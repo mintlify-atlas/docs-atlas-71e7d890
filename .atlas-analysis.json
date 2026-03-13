@@ -1,0 +1,135 @@
+{
+  "projectType": "cli-tool",
+  "projectName": "CURD",
+  "projectDescription": "A code-intelligence control plane that makes version control workable again through semantic understanding, safe mutation, and governed workflows.",
+  "theme": "aspen",
+  "primaryColor": "#21c0a7",
+  "lightColor": "#092024",
+  "darkColor": "#c5d2d1",
+  "navigation": {
+    "tabs": [
+      {
+        "tab": "Documentation",
+        "groups": [
+          {
+            "group": "Get Started",
+            "pages": [
+              "introduction",
+              "installation",
+              "quickstart"
+            ]
+          },
+          {
+            "group": "Core Concepts",
+            "pages": [
+              "core-concepts/code-intelligence",
+              "core-concepts/shadow-workspace",
+              "core-concepts/profiles-and-ceilings",
+              "core-concepts/scripts-and-plans"
+            ]
+          },
+          {
+            "group": "Guides",
+            "pages": [
+              "guides/understanding-code",
+              "guides/safe-editing",
+              "guides/workflow-automation",
+              "guides/agent-integration"
+            ]
+          },
+          {
+            "group": "Advanced",
+            "pages": [
+              "advanced/plugin-system",
+              "advanced/mcp-server",
+              "advanced/build-adapters",
+              "advanced/control-plane"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "CLI Reference",
+        "groups": [
+          {
+            "group": "Commands",
+            "pages": [
+              "cli/overview",
+              "cli/init",
+              "cli/search",
+              "cli/read",
+              "cli/edit",
+              "cli/graph",
+              "cli/workspace",
+              "cli/run",
+              "cli/plan",
+              "cli/doctor",
+              "cli/build",
+              "cli/mcp",
+              "cli/repl"
+            ]
+          },
+          {
+            "group": "Configuration",
+            "pages": [
+              "cli/settings",
+              "cli/profiles"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "Scripting",
+        "groups": [
+          {
+            "group": ".curd Language",
+            "pages": [
+              "scripting/overview",
+              "scripting/syntax",
+              "scripting/variables",
+              "scripting/control-flow",
+              "scripting/tool-calls"
+            ]
+          },
+          {
+            "group": "Workflow Patterns",
+            "pages": [
+              "scripting/examples",
+              "scripting/best-practices"
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "keyFeatures": [
+    "BM25/FTS-backed ranked search with Tree-sitter parsing",
+    "Shadow workspace transactions for safe code mutation",
+    "Graph-aware dependency and call analysis",
+    ".curd script language for repeatable workflows",
+    "Profile-based capability gating and runtime ceilings",
+    "Model Context Protocol (MCP) server for agent integration",
+    "Plugin system for language and tool extensions",
+    "Multi-language support (Rust, Python, JavaScript, TypeScript, Go, C/C++, Java)"
+  ],
+  "publicApiSurface": [
+    "curd init",
+    "curd search <query>",
+    "curd read <uri>",
+    "curd edit <uri>",
+    "curd graph <uri>",
+    "curd workspace begin|commit|rollback|diff",
+    "curd run <script.curd>",
+    "curd plan edit|list|show",
+    "curd doctor",
+    "curd build",
+    "curd mcp",
+    "curd repl",
+    "SearchEngine API",
+    "ReadEngine API",
+    "EditEngine API",
+    "GraphEngine API",
+    "WorkspaceEngine API",
+    "PlanRuntime API"
+  ]
+}
