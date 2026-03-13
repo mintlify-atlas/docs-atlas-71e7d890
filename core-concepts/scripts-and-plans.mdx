@@ -1,0 +1,721 @@
+---
+title: 'Scripts and Plans'
+description: '.curd source language, plan artifacts, compilation flow, and explainability metadata'
+---
+
+CURD separates **authoring** (`.curd` scripts) from **governed execution** (compiled plan artifacts). This split enables readable workflows for developers while providing inspectable, safeguarded execution for teams.
+
+## Why Both Exist
+
+From SCRIPTS_AND_PLANS.md:10:
+
+> ".curd is better for humans and agents to author intent. Compiled plan artifacts are better for bound arguments, explainability metadata, safeguards, profile/runtime context, and repeatable execution."
+
+<CardGroup cols={2}>
+  <Card title=".curd Scripts" icon="file-code">
+    **Human/Agent Authoring**
+    - Readable syntax
+    - Parameterized workflows
+    - Iterative development
+  </Card>
+  <Card title="Plan Artifacts" icon="file-check">
+    **Governed Execution**
+    - Bound arguments
+    - Explainability metadata
+    - Safeguards
+    - Execution history
+  </Card>
+</CardGroup>
+
+## .curd Source Language
+
+The `.curd` language is a DSL for authoring code mutation workflows.
+
+### Supported Constructs
+
+From SCRIPTS_AND_PLANS.md:27:
+
+- `use profile ...` — Declare execution profile
+- `use session ...` — Declare session requirement
+- `arg` — Define script arguments
+- `let` — Variable assignment
+- Multiline strings (`"""..."""`) — Patch content
+- Tool-call statements — Invoke CURD tools
+- `sequence` — Sequential execution block
+- `atomic` — Transactional block (rollback on failure)
+- `abort` — Explicit rollback trigger
+
+<Warning>
+`parallel` is parsed but **rejected** at compile/execute time until the runtime has honest parallel lowering.
+</Warning>
+
+### Example Script
+
+```curd
+# explain: tighten auth validation without changing the public entrypoint
+# why: downstream callers depend on the current function name
+# risk: auth and session modules are tightly connected
+
+use session required
+
+let patch = """
+pub fn validate(token: &str) -> bool {
+    !token.is_empty()
+}
+"""
+
+atomic {
+  edit uri="src/auth.rs::validate" action="upsert" code=$patch
+  verify_impact strict=true
+}
+```
+
+### Explainability Comments
+
+From SCRIPTS_AND_PLANS.md:45:
+
+Structured comments are preserved into compiled metadata:
+
+- `# explain: ...` — High-level intent
+- `# why: ...` — Rationale
+- `# risk: ...` — Known hazards
+- `# review: ...` — Review notes
+- `# tag: ...` — Categorization tags
+
+These become part of the compiled plan artifact for audit and review.
+
+### Script Arguments
+
+Arguments enable one source script to generate multiple concrete plan artifacts:
+
+```curd
+arg target_uri: string
+arg strict: bool = true
+
+let patch = """
+pub fn alpha() {}
+"""
+
+edit uri=$target_uri action="upsert" code=$patch
+verify_impact strict=$strict
+```
+
+**Compilation with arguments**:
+
+```bash
+curd run compile fix.curd --target-uri src/lib.rs::alpha
+curd run compile fix.curd --target-uri src/lib.rs::beta --strict false
+```
+
+Each invocation produces a different plan artifact with bound argument values.
+
+## Script Lifecycle
+
+<Steps>
+
+### 1. Check
+
+```bash
+curd run check fix_auth.curd
+```
+
+Validates the script without mutation:
+- Resolves target URIs
+- Computes graph-adjacent impact
+- Detects conflict risk
+- Reports session requirement
+- Suggests safeguards
+
+From SCRIPTS_AND_PLANS.md:92:
+
+> "This is the step that turns a script from 'idea' into 'something you can reason about'."
+
+### 2. Compile
+
+```bash
+curd run compile fix_auth.curd
+```
+
+Emits a compiled plan artifact under `.curd/plans/`.
+
+Artifact contains:
+- Compiled DSL/plan payload
+- Source hash
+- Source path
+- Bound argument values
+- Explainability metadata
+- Safeguards
+- Runtime ceiling snapshot
+
+### 3. Edit the Plan
+
+```bash
+curd plan edit <plan-id>
+```
+
+Guided edits for:
+- Profile selection
+- Default `output_limit`
+- Per-node `output_limit`
+- Default `retry_limit`
+- Per-node `retry_limit`
+
+From SCRIPTS_AND_PLANS.md:128:
+
+> "This is where a team can add stronger execution posture after the authoring step: choose a stricter profile, lower output budgets, reduce retries."
+
+### 4. Execute
+
+For mutating scripts:
+
+```bash
+curd workspace begin
+curd run fix_auth.curd
+curd workspace commit
+```
+
+If execution should be discarded:
+
+```bash
+curd workspace rollback
+```
+
+</Steps>
+
+## Plan Artifacts
+
+Compiled plan artifacts are the execution contract.
+
+### Plan Structure
+
+From curd-core/src/plan/engine.rs:186:
+
+```rust
+pub struct Plan {
+    pub id: Uuid,
+    pub nodes: Vec<PlanNode>,
+}
+
+pub struct PlanNode {
+    pub id: NodeId,
+    pub op: ToolOperation,              // Tool call or internal command
+    pub dependencies: Vec<IdOrTag>,     // Dependency DAG
+    pub output_limit: usize,            // Artifact compaction threshold
+    pub retry_limit: u8,                // Retry attempts
+}
+```
+
+### Tool Operation Types
+
+```rust
+// curd-core/src/plan/engine.rs:212
+pub enum ToolOperation {
+    /// Standard MCP Tool Execution
+    McpCall {
+        tool: String,
+        args: serde_json::Value,
+    },
+    /// Internal Engine Operations
+    Internal {
+        command: String,
+        params: serde_json::Value,
+    },
+}
+```
+
+**Allowed internal commands** (curd-core/src/policy.rs:162):
+- `recompute_graph`
+- `invalidate_index`
+- `emit_marker`
+- `clear_shadow`
+
+<Note>
+`clear_shadow` is **human-only** and cannot be used in agent-executed plans.
+</Note>
+
+### Dependency Resolution
+
+Nodes can depend on other nodes via ID or tag:
+
+```rust
+// curd-core/src/plan/engine.rs:205
+pub enum IdOrTag {
+    Id(NodeId),   // Direct UUID reference
+    Tag(String),  // Named tag for semantic grouping
+}
+```
+
+Execution respects the dependency DAG:
+
+```
+┌─────────┐
+│ Node A  │
+│ (edit)  │
+└────┬────┘
+     │
+     ▼
+┌─────────┐
+│ Node B  │ (depends on A)
+│ (verify)│
+└────┬────┘
+     │
+     ▼
+┌─────────┐
+│ Node C  │ (depends on B)
+│ (commit)│
+└─────────┘
+```
+
+## Compilation Flow
+
+The `.curd` source is parsed into an AST and lowered to a plan:
+
+<Steps>
+
+### Parse Source
+
+Lex and parse `.curd` file into `DslNode` AST
+
+### Validate Syntax
+
+Check for unsupported constructs (e.g., `parallel`)
+
+### Resolve Arguments
+
+Bind provided argument values (e.g., `--target-uri`)
+
+### Lower to Plan
+
+Convert `DslNode` tree to `PlanNode` DAG with dependencies
+
+### Attach Metadata
+
+Include explainability comments, source hash, safeguards
+
+### Emit Artifact
+
+Serialize plan to `.curd/plans/<uuid>.json`
+
+</Steps>
+
+### DSL Node Types
+
+From curd-core/src/plan/engine.rs:61:
+
+```rust
+pub enum DslNode {
+    /// Tool call: tool_name(args)
+    Call {
+        tool: String,
+        args: serde_json::Value,
+    },
+    /// Transactional block: atomic { ... }
+    Atomic { nodes: Vec<DslNode> },
+    /// Deterministic termination: abort("reason")
+    Abort { reason: String },
+    /// Variable assignment: let x = ...
+    Assign {
+        var: String,
+        value: serde_json::Value,
+    },
+}
+```
+
+### Variable Resolution
+
+From curd-core/src/plan/engine.rs:114:
+
+```rust
+impl ReplState {
+    pub fn resolve(&self, value: &Value) -> Value {
+        match value {
+            Value::String(s) => {
+                // 1. Exact variable match: $my_var
+                if s == format!("${}", var_name) {
+                    return var_value.clone();
+                }
+                
+                // 2. Complex path: $res[0].id
+                if let Some(stripped) = s.strip_prefix('$') {
+                    let parts: Vec<&str> = stripped.split('.').collect();
+                    // Traverse nested structure
+                }
+                
+                // 3. Substring interpolation (fallback)
+                resolved.replace("$var", var_value)
+            }
+            // ... recursive resolution for objects/arrays
+        }
+    }
+}
+```
+
+## Safeguards and Constraints
+
+### Plan Validation
+
+From curd-core/src/policy.rs:406:
+
+```rust
+pub fn validate_plan(
+    &self,
+    plan: &crate::plan::Plan,
+    is_human: bool,
+    workspace_root: &Path,
+) -> PolicyDecision {
+    // 1. Node count limit
+    if plan.nodes.len() > MAX_PLAN_NODES {  // 128
+        return PolicyDecision::Deny("PLAN_REJECTED: exceeds max node count");
+    }
+
+    // 2. Unique node IDs
+    if duplicate_ids_exist(plan) {
+        return PolicyDecision::Deny("PLAN_REJECTED: duplicate node id");
+    }
+
+    // 3. Dependency fan-in limit
+    if node.dependencies.len() > MAX_PLAN_DEPENDENCIES {  // 32
+        return PolicyDecision::Deny("PLAN_REJECTED: exceeds max dependency fan-in");
+    }
+
+    // 4. Retry limit
+    if node.retry_limit > MAX_PLAN_RETRY_LIMIT {  // 3
+        return PolicyDecision::Deny("PLAN_REJECTED: exceeds max retry_limit");
+    }
+
+    // 5. Output limit bounds
+    if node.output_limit == 0 || node.output_limit > MAX_PLAN_OUTPUT_LIMIT_BYTES {  // 1 MB
+        return PolicyDecision::Deny("PLAN_REJECTED: invalid output_limit");
+    }
+
+    // 6. Per-node policy checks
+    for node in plan.nodes {
+        match self.evaluate(node.tool, node.args, is_human, workspace_root) {
+            PolicyDecision::Deny(reason) => {
+                return PolicyDecision::Deny(format!("PLAN_REJECTED: {}", reason));
+            }
+            _ => {}
+        }
+    }
+
+    PolicyDecision::Allow
+}
+```
+
+<Warning>
+Plan validation is **all-or-nothing**. If any node violates policy, the entire plan is rejected at registration time.
+</Warning>
+
+### Retry Policy
+
+Nodes can specify retry behavior:
+
+```json
+{
+  "id": "a1b2c3d4-...",
+  "op": {
+    "McpCall": {
+      "tool": "edit",
+      "args": {...}
+    }
+  },
+  "retry_limit": 2,  // Up to 2 retries on failure
+  "output_limit": 65536
+}
+```
+
+From curd-core/src/policy.rs:436:
+
+```rust
+if node.retry_limit > MAX_PLAN_RETRY_LIMIT {  // 3
+    return PolicyDecision::Deny(
+        "PLAN_REJECTED: node exceeds max retry_limit."
+    );
+}
+```
+
+### Output Compaction
+
+Large outputs are automatically truncated and written to disk:
+
+```rust
+// curd-core/src/plan/engine.rs:199
+pub struct PlanNode {
+    pub output_limit: usize,  // Threshold in bytes
+    // If tool output exceeds this, write to artifact file
+}
+```
+
+From curd-core/src/policy.rs:160:
+
+```rust
+const MAX_PLAN_OUTPUT_LIMIT_BYTES: usize = 1024 * 1024;  // 1 MB
+```
+
+## Execution Model
+
+Plans execute with focus tracking and checkpoint persistence:
+
+### Focus State
+
+From curd-core/src/plan/engine.rs:244:
+
+```rust
+struct FocusState {
+    updated_at_secs: u64,
+    active_tools: Vec<String>,      // Recently invoked tools
+    active_uris: Vec<String>,       // Recently accessed URIs
+    active_symbols: Vec<String>,    // Recently touched symbols
+}
+```
+
+**Focus pruning** limits context size by removing distant nodes from the graph:
+
+```rust
+// curd-core/src/plan/engine.rs:263
+struct FocusPrunePolicy {
+    enabled: bool,
+    max_distance: u8,       // BFS depth from active symbols
+    max_uris: usize,        // Hard cap on URI count
+    override_keep_uris: Vec<String>,  // Always keep these
+}
+```
+
+<Info>
+This prevents plans from pulling in the entire codebase context, improving performance and reducing token usage for LLM-driven agents.
+</Info>
+
+### Checkpoints
+
+From curd-core/src/plan/engine.rs:253:
+
+```rust
+struct CheckpointRecord {
+    ts_secs: u64,
+    event: String,                    // "node_start", "node_complete", "plan_aborted"
+    plan_id: Uuid,
+    node_id: Option<NodeId>,
+    focus_state_path: String,
+    plan_run_state_path: String,
+    artifact_refs: Vec<String>,       // Outputs written to disk
+}
+```
+
+Checkpoints are written to `.curd/checkpoints/<plan_id>/<seq>_<event>.json`.
+
+**Usage**:
+- Resume interrupted plans
+- Debug plan execution history
+- Audit what was executed and when
+
+### Plan Run State
+
+```rust
+// curd-core/src/plan/engine.rs:238
+struct PlanRunState {
+    plan_id: Uuid,
+    status: String,  // "running", "completed", "failed", "aborted"
+    nodes: HashMap<String, PlanNodeRunState>,
+}
+
+struct PlanNodeRunState {
+    node_id: NodeId,
+    status: String,        // "pending", "running", "completed", "failed"
+    retries: u8,           // Current retry count
+    last_error: Option<String>,
+}
+```
+
+Stored in `.curd/plan_runs/<plan_id>.json`.
+
+## Trust Model
+
+From SCRIPTS_AND_PLANS.md:178:
+
+> "`.curd` files are normal source files. Compiled plan artifacts are the stronger execution objects."
+
+**Implications**:
+- Humans and agents author `.curd` scripts (version-controlled)
+- CURD compiles and enriches the result (adds safeguards)
+- Teams inspect and approve plan artifacts before execution
+- Plan artifacts are the governance boundary
+
+<Steps>
+
+### Author Script
+
+Write `.curd` with readable intent
+
+### Compile to Plan
+
+CURD validates and adds safeguards
+
+### Review Plan Artifact
+
+Team inspects compiled JSON for safety
+
+### Execute with Governance
+
+Plan runs with profile/policy enforcement
+
+</Steps>
+
+## When to Use Each
+
+### Stay in .curd Scripts When...
+
+From SCRIPTS_AND_PLANS.md:194:
+
+- You want readable, reusable workflows
+- Easier authoring than raw JSON
+- Iterative graph-aware preflight
+- Parameterized mutation patterns
+
+### Care About Plan Artifacts When...
+
+From SCRIPTS_AND_PLANS.md:202:
+
+- You need stable execution history
+- Explicit safeguards
+- Inspectable defaults
+- Governance-ready execution records
+
+<Note>
+For internal agent infrastructure, the plan artifact is the execution object. The script is the authoring source. The gap between them is where safeguards, explainability, and policy become concrete.
+</Note>
+
+## Example: Full Workflow
+
+<Steps>
+
+### Write Script
+
+```curd
+# file: tighten_auth.curd
+# explain: add null check to validate function
+# risk: auth module is mission-critical
+
+use profile supervised
+use session required
+
+arg target: string = "src/auth.rs::validate"
+
+let patch = """
+pub fn validate(token: &str) -> Result<bool> {
+    if token.is_empty() {
+        return Err(anyhow!("empty token"));
+    }
+    Ok(true)
+}
+"""
+
+atomic {
+  edit uri=$target action="upsert" code=$patch
+  verify_impact strict=true
+}
+```
+
+### Check Intent
+
+```bash
+curd run check tighten_auth.curd
+```
+
+**Output**:
+```
+Resolved targets: src/auth.rs::validate
+Impact: 2 callers, 0 callees
+Conflict risk: LOW
+Session: REQUIRED
+Suggested safeguards: verify_impact strict=true
+```
+
+### Compile Plan
+
+```bash
+curd run compile tighten_auth.curd
+```
+
+**Output**:
+```
+Compiled plan: .curd/plans/a1b2c3d4-5678-90ab-cdef-1234567890ab.json
+Source hash: e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
+Nodes: 2
+Profile: supervised
+```
+
+### Inspect Plan
+
+```bash
+cat .curd/plans/a1b2c3d4-5678-90ab-cdef-1234567890ab.json
+```
+
+```json
+{
+  "id": "a1b2c3d4-5678-90ab-cdef-1234567890ab",
+  "nodes": [
+    {
+      "id": "n1-...",
+      "op": {
+        "McpCall": {
+          "tool": "edit",
+          "args": {
+            "uri": "src/auth.rs::validate",
+            "action": "upsert",
+            "code": "pub fn validate..."
+          }
+        }
+      },
+      "dependencies": [],
+      "output_limit": 65536,
+      "retry_limit": 1
+    },
+    {
+      "id": "n2-...",
+      "op": {
+        "McpCall": {
+          "tool": "verify_impact",
+          "args": {"strict": true}
+        }
+      },
+      "dependencies": [{"Id": "n1-..."}],
+      "output_limit": 65536,
+      "retry_limit": 0
+    }
+  ],
+  "_metadata": {
+    "source_path": "tighten_auth.curd",
+    "source_hash": "e3b0c442...",
+    "bound_args": {"target": "src/auth.rs::validate"},
+    "explainability": {
+      "explain": "add null check to validate function",
+      "risk": "auth module is mission-critical"
+    },
+    "profile": "supervised",
+    "session_required": true
+  }
+}
+```
+
+### Execute Plan
+
+```bash
+curd workspace begin
+curd run tighten_auth.curd
+curd workspace diff
+# Review changes...
+curd workspace commit
+```
+
+</Steps>
+
+## Related Concepts
+
+<CardGroup cols={2}>
+  <Card title="Shadow Workspace" icon="layer-group" href="/core-concepts/shadow-workspace">
+    Transaction model for execution
+  </Card>
+  <Card title="Profiles & Ceilings" icon="shield-halved" href="/core-concepts/profiles-and-ceilings">
+    Profile enforcement during execution
+  </Card>
+</CardGroup>

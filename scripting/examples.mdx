@@ -1,0 +1,500 @@
+---
+title: 'Workflow Examples'
+description: 'Real-world .curd script examples'
+---
+
+## Example 1: Safe Function Update
+
+Update a function with full context checking and atomic application.
+
+```curd
+# explain: tighten auth validation without changing the public entrypoint
+# why: downstream callers depend on the current function name
+# risk: auth and session modules are tightly connected
+
+use session required
+
+arg target_uri: string = "src/auth.rs::validate"
+
+let patch = """
+pub fn validate(token: &str) -> bool {
+    !token.is_empty()
+}
+"""
+
+atomic {
+  edit uri=$target_uri action="upsert" code=$patch
+  verify_impact strict=true
+}
+```
+
+**Usage:**
+
+```bash
+# Check the script
+curd run check fix_auth.curd
+
+# Compile with custom target
+curd run compile fix_auth.curd --target-uri "src/auth.rs::validate"
+
+# Execute safely
+curd workspace begin
+curd run fix_auth.curd
+curd workspace diff
+curd workspace commit
+```
+
+## Example 2: Multi-Stage Refactoring
+
+Organize complex refactoring into named stages.
+
+```curd
+# explain: safely update authentication logic
+# why: fix security vulnerability in token validation
+# risk: auth module is critical path
+
+use profile supervised
+use session required
+
+arg target_uri: string
+arg strict: bool = true
+
+let patch = """
+pub fn alpha() {
+    println!("updated");
+}
+"""
+
+sequence analysis {
+  read $target_uri
+  graph uri=$target_uri direction="both" depth=2
+}
+
+sequence modification {
+  atomic apply_fix {
+    edit uri=$target_uri action="upsert" code=$patch
+    verify_impact strict=$strict
+  }
+}
+
+sequence verification {
+  read $target_uri
+}
+```
+
+**Compilation:**
+
+```bash
+curd run compile refactor.curd \
+  --target-uri "src/lib.rs::alpha" \
+  --strict true
+```
+
+## Example 3: Parameterized Multi-Target Update
+
+Apply the same change pattern to multiple targets.
+
+```curd
+# explain: standardize error handling across modules
+
+use session required
+
+arg target_uri: string
+arg strict: bool = true
+
+let patch = """
+pub fn alpha() {}
+"""
+
+edit uri=$target_uri action="upsert" code=$patch
+verify_impact strict=$strict
+```
+
+**Multiple Compilations:**
+
+```bash
+# Compile for auth module
+curd run compile standardize.curd --target-uri "src/auth.rs::handle_error"
+
+# Compile for session module
+curd run compile standardize.curd --target-uri "src/session.rs::handle_error"
+
+# Compile for API module
+curd run compile standardize.curd --target-uri "src/api.rs::handle_error"
+```
+
+Each compilation creates a unique plan artifact with different bound values.
+
+## Example 4: Read and Analyze Before Edit
+
+Gather full context before making changes.
+
+```curd
+# explain: read before review
+
+arg target: string = "src/lib.rs::alpha"
+
+read $target
+graph uri=$target direction="both" depth=2
+verify_impact strict=true
+```
+
+**Non-Mutating Analysis:**
+
+```bash
+# No session required for read-only operations
+curd run check analyze.curd --target "src/auth.rs::validate"
+curd run analyze.curd --target "src/auth.rs::validate"
+```
+
+## Example 5: Atomic Multi-Edit
+
+Apply related changes as a transaction.
+
+```curd
+# explain: rename function and update callers atomically
+# risk: breaking change if not atomic
+# review: verify all callsites updated
+
+use session required
+
+arg function_uri: string
+arg caller_uri: string
+
+let new_impl = """
+pub fn authenticate(token: &str) -> bool {
+    validate_token(token)
+}
+"""
+
+let caller_patch = "authenticate(token)"
+
+atomic rename_transaction {
+  edit uri=$function_uri code=$new_impl action="replace"
+  edit uri=$caller_uri code=$caller_patch action="replace"
+  verify_impact strict=true
+}
+```
+
+**Execution:**
+
+```bash
+curd workspace begin
+curd run rename.curd \
+  --function-uri "src/auth.rs::auth" \
+  --caller-uri "src/api.rs::handle_request"
+curd workspace commit
+```
+
+## Example 6: Build Verification Workflow
+
+Edit, verify, and run tests.
+
+```curd
+# explain: update function and verify build
+# why: ensure changes don't break compilation
+
+use session required
+
+arg target_uri: string
+
+let code = """
+pub fn validate() {
+    // New implementation
+}
+"""
+
+sequence safe_update {
+  atomic apply {
+    edit uri=$target_uri code=$code action="upsert"
+    verify_impact strict=true
+  }
+  
+  shell "cargo build"
+  shell "cargo test"
+}
+```
+
+## Example 7: Conditional Verification
+
+Use default arguments for flexible verification.
+
+```curd
+arg strict: bool = true
+
+verify_impact strict=$strict
+```
+
+**Compile with different strictness:**
+
+```bash
+# Strict verification (default)
+curd run compile verify.curd
+
+# Lenient verification
+curd run compile verify.curd --strict false
+```
+
+## Example 8: Dependency Analysis
+
+Comprehensive graph traversal.
+
+```curd
+# explain: understand impact radius before changes
+# why: this function is called from many places
+
+arg target_uri: string
+
+sequence impact_analysis {
+  # Read the function
+  read $target_uri
+  
+  # Check who calls it
+  graph uri=$target_uri direction="callers" depth=2
+  
+  # Check what it calls
+  graph uri=$target_uri direction="callees" depth=1
+  
+  # Full neighborhood
+  graph uri=$target_uri direction="both" depth=2
+}
+```
+
+## Example 9: Security Update Pattern
+
+```curd
+# explain: fix authentication vulnerability in token validation
+# why: current implementation doesn't verify token signatures
+# risk: auth module is critical security boundary
+# review: security team review required before production
+# tag: security, authentication
+
+use profile supervised
+use session required
+
+arg target_uri: string = "src/auth.rs::validate"
+arg strict_verification: bool = true
+
+let security_patch = """
+pub fn validate(token: &str) -> Result<bool, AuthError> {
+    if token.is_empty() {
+        return Err(AuthError::EmptyToken);
+    }
+    
+    if !verify_signature(token) {
+        return Err(AuthError::InvalidSignature);
+    }
+    
+    if is_expired(token) {
+        return Err(AuthError::Expired);
+    }
+    
+    Ok(true)
+}
+"""
+
+sequence analysis {
+  search query="auth token"
+  read $target_uri
+  graph uri=$target_uri direction="both" depth=2
+}
+
+sequence apply_fix {
+  atomic security_update {
+    edit uri=$target_uri code=$security_patch action="upsert"
+    verify_impact strict=$strict_verification
+  }
+}
+
+sequence verify {
+  read $target_uri
+  shell "cargo test auth::validate"
+}
+```
+
+## Example 10: Staged Rollout
+
+Apply changes in independent stages.
+
+```curd
+# explain: staged rollout of new error handling
+# why: minimize blast radius
+
+use session required
+
+let error_handler = """
+pub fn handle_error(e: Error) {
+    log::error!("Error: {:?}", e);
+}
+"""
+
+sequence stage1_low_risk {
+  atomic {
+    edit uri="src/utils.rs::handle_error" code=$error_handler action="upsert"
+    verify_impact strict=true
+  }
+}
+
+sequence stage2_medium_risk {
+  atomic {
+    edit uri="src/api.rs::handle_error" code=$error_handler action="upsert"
+    verify_impact strict=true
+  }
+}
+
+sequence stage3_high_risk {
+  atomic {
+    edit uri="src/core.rs::handle_error" code=$error_handler action="upsert"
+    verify_impact strict=true
+  }
+}
+```
+
+## Example 11: Default Arguments Pattern
+
+```curd
+# Demonstrate flexible parameterization
+
+arg target: string = "src/lib.rs::alpha"
+arg verify: bool = true
+arg depth: number = 2
+
+read $target
+graph uri=$target depth=$depth
+
+atomic {
+  edit uri=$target code="pub fn alpha() {}" action="upsert"
+  verify_impact strict=$verify
+}
+```
+
+**Flexible Compilation:**
+
+```bash
+# Use all defaults
+curd run compile flexible.curd
+
+# Override target only
+curd run compile flexible.curd --target "src/auth.rs::validate"
+
+# Override multiple args
+curd run compile flexible.curd \
+  --target "src/session.rs::create" \
+  --verify false \
+  --depth 3
+```
+
+## Example 12: Search-Driven Workflow
+
+```curd
+# explain: find and fix deprecated API usage
+# tag: refactoring, deprecation
+
+use session required
+
+arg search_term: string = "old_api"
+arg replacement_code: string
+
+sequence find_usage {
+  search query=$search_term
+  # In practice, would process results
+}
+
+sequence apply_fixes {
+  atomic {
+    edit uri="src/caller1.rs::use_api" code=$replacement_code action="replace"
+    edit uri="src/caller2.rs::use_api" code=$replacement_code action="replace"
+    verify_impact strict=true
+  }
+}
+```
+
+## Common Patterns Summary
+
+### Pattern: Read-Graph-Edit-Verify
+
+```curd
+read $target
+graph uri=$target direction="both" depth=2
+
+atomic {
+  edit uri=$target code=$patch action="upsert"
+  verify_impact strict=true
+}
+```
+
+### Pattern: Atomic with Verification
+
+```curd
+atomic {
+  edit uri=$target code=$patch
+  verify_impact strict=true
+}
+```
+
+### Pattern: Staged Execution
+
+```curd
+sequence stage1 { ... }
+sequence stage2 { ... }
+sequence stage3 { ... }
+```
+
+### Pattern: Parameterized Target
+
+```curd
+arg target_uri: string
+arg strict: bool = true
+
+edit uri=$target_uri code=$patch
+verify_impact strict=$strict
+```
+
+### Pattern: Build Verification
+
+```curd
+atomic {
+  edit uri=$target code=$patch
+  verify_impact strict=true
+}
+
+shell "cargo test"
+```
+
+## Execution Workflow
+
+For any mutating script:
+
+```bash
+# 1. Check syntax and semantics
+curd run check script.curd
+
+# 2. Compile with arguments
+curd run compile script.curd --arg1 value1 --arg2 value2
+
+# 3. Optional: edit plan artifact
+curd plan edit <plan-id>
+
+# 4. Execute in session
+curd workspace begin
+curd run script.curd
+
+# 5. Review changes
+curd workspace diff
+
+# 6. Commit or rollback
+curd workspace commit
+# OR
+curd workspace rollback
+```
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Best Practices" icon="stars" href="/scripting/best-practices">
+    Explainability comments, safety patterns, and governance
+  </Card>
+  <Card title="Tool Reference" icon="wrench" href="/scripting/tool-calls">
+    Complete tool call reference
+  </Card>
+</CardGroup>

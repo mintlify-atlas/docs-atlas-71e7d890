@@ -1,0 +1,331 @@
+---
+title: Safe Code Editing
+description: Transaction-based workspace sessions with diff inspection, rollback, and commit workflows
+---
+
+CURD enforces a mandatory transaction model for all code mutations. Every edit executes in an isolated shadow workspace, preventing broken builds and enabling safe exploration.
+
+## Shadow Workspace Model
+
+The ShadowStore implements Copy-on-Write transactions:
+
+1. `begin` creates a physical clone at `.curd/shadow/<uuid>/root`
+2. All edits execute against the shadow copy
+3. `diff` shows staged changes without affecting the workspace
+4. `commit` performs conflict-aware writeback
+5. `rollback` discards shadow state cleanly
+
+<Warning>
+Agents MUST open a session via `workspace begin` before calling any mutating tools (`edit`, `mutate`, `manage_file`). Attempting mutations without an active session triggers a barrier error.
+</Warning>
+
+## Workspace Session Lifecycle
+
+### Beginning a Session
+
+<Steps>
+  <Step title="Initialize Session">
+    Start a new shadow workspace transaction
+    
+    ```bash
+    curd workspace begin
+    ```
+    
+    This creates:
+    - Shadow directory at `.curd/shadow/curd_shadow_<uuid>`
+    - Base hash snapshot for conflict detection
+    - HEAD manifest at `.curd/shadow/HEAD`
+  </Step>
+  
+  <Step title="Verify Session">
+    Check active transaction status
+    
+    ```bash
+    curd workspace status
+    ```
+    
+    Returns session UUID, staged files, and transaction state.
+  </Step>
+</Steps>
+
+### Transaction State Tracking
+
+The TransactionState structure persists across interruptions:
+
+```rust
+pub struct TransactionState {
+    pub active_uuid: String,
+    pub staged_files: Vec<PathBuf>,
+    pub base_hashes: HashMap<PathBuf, String>,
+    pub shadow_meta: HashMap<PathBuf, ShadowFileMeta>,
+}
+```
+
+<Note>
+If a session is interrupted, CURD automatically recovers the active transaction on next invocation by reading `.curd/shadow/HEAD`.
+</Note>
+
+## Edit Operations
+
+All edits operate on AST-aware boundaries within the shadow workspace.
+
+### Edit Actions
+
+<CodeGroup>
+```bash Upsert (Create/Replace)
+curd edit src/lib.rs::alpha --code "pub fn alpha() {}" \
+  --action upsert \
+  --adaptation-justification "Tighten implementation"
+```
+
+```bash Delete Symbol
+curd edit src/utils.py::helper --action delete \
+  --adaptation-justification "Remove deprecated helper"
+```
+</CodeGroup>
+
+### Required Parameters
+
+- **uri**: Target symbol or file path (e.g., `src/auth.rs::validate`)
+- **code**: New source code (not required for delete)
+- **adaptation_justification**: Technical reason for the change (required for all mutations)
+
+<Tip>
+The EditEngine uses Tree-sitter to locate exact symbol boundaries, ensuring edits never corrupt surrounding code.
+</Tip>
+
+### Edit URI Resolution
+
+The edit engine parses URIs into components:
+
+```rust
+let mut parts = uri.splitn(2, "::");
+let file_part = parts.next().unwrap_or("");
+let symbol_part = parts.next();
+```
+
+If a symbol part exists, CURD performs symbol-level replacement. Otherwise, it treats the URI as a file path.
+
+## Diff Inspection
+
+The `diff` action reveals all staged changes before commit.
+
+```bash
+curd workspace diff
+```
+
+### Diff Output Format
+
+```json
+{
+  "staged_files": ["src/lib.rs", "src/auth.rs"],
+  "diffs": [
+    {
+      "path": "src/lib.rs",
+      "status": "modified",
+      "diff": "@@ -15,3 +15,4 @@\n pub fn alpha() {\n+    println!(\"updated\");\n }"
+    }
+  ]
+}
+```
+
+<Note>
+Diffs reflect both explicitly staged files and implicit shadow modifications. The diff engine uses unified diff format compatible with `git` and `patch`.
+</Note>
+
+## Rollback vs Commit
+
+### Rollback: Discard Changes
+
+Rollback cleans the shadow workspace without affecting the base workspace:
+
+```bash
+curd workspace rollback
+```
+
+This:
+- Removes the shadow directory
+- Clears the HEAD manifest
+- Resets staged file tracking
+- Leaves workspace files untouched
+
+<Warning>
+Rollback is destructive. All shadow changes are permanently lost.
+</Warning>
+
+### Commit: Apply Changes
+
+Commit performs conflict-aware writeback to the workspace:
+
+```bash
+curd workspace commit
+```
+
+#### Commit Workflow
+
+<Steps>
+  <Step title="Conflict Detection">
+    Compare workspace file hashes against base snapshots
+    
+    ```rust
+    if base_hash_mismatch {
+        attempt_three_way_merge_via_git_merge_file()
+    }
+    ```
+  </Step>
+  
+  <Step title="Writeback">
+    Copy modified files from shadow to workspace
+  </Step>
+  
+  <Step title="Cleanup">
+    Remove shadow directory and HEAD manifest
+  </Step>
+</Steps>
+
+### Conflict Resolution
+
+If workspace files changed during the session, CURD attempts a three-way merge:
+
+```bash
+git merge-file <workspace_file> <base_snapshot> <shadow_file>
+```
+
+On merge failure, commit returns a conflict error with details.
+
+## Complete Workflow Example
+
+### Safe Mutation Pattern
+
+<Steps>
+  <Step title="Begin Session">
+    ```bash
+    curd workspace begin
+    ```
+  </Step>
+  
+  <Step title="Make Edits">
+    ```bash
+    curd edit src/lib.rs::alpha --code "pub fn alpha() {}" \
+      --adaptation-justification "Simplify implementation"
+    ```
+  </Step>
+  
+  <Step title="Inspect Changes">
+    ```bash
+    curd workspace diff
+    ```
+  </Step>
+  
+  <Step title="Decide">
+    Keep changes:
+    ```bash
+    curd workspace commit
+    ```
+    
+    Or discard:
+    ```bash
+    curd workspace rollback
+    ```
+  </Step>
+</Steps>
+
+### Exploration Pattern
+
+For experimental changes you might discard:
+
+```bash
+curd workspace begin
+curd edit src/lib.rs::alpha --code "pub fn alpha() {}" \
+  --adaptation-justification "Test alternate approach"
+curd workspace diff
+curd workspace rollback  # Discard experiment
+```
+
+## Nested Transactions
+
+CURD supports nested savepoints within an active session:
+
+```rust
+if self.active {
+    self.savepoints.push(Savepoint {
+        staged_files: self.staged_files.clone(),
+        base_hashes: self.base_hashes.clone(),
+    });
+}
+```
+
+Calling `begin` while a session is active creates a savepoint. Rollback restores to the most recent savepoint.
+
+<Tip>
+Use nested transactions for multi-step refactorings where you want to rollback partial progress.
+</Tip>
+
+## Shadow Workspace Constraints
+
+The ShadowStore enforces strict boundaries:
+
+1. **Never write outside workspace root**: All paths validated against workspace boundary
+2. **Respect gitignore**: Shadow clones exclude `.git`, `.curd`, and ignored directories
+3. **Locked sessions**: Only one active transaction per workspace (prevents conflicts)
+
+### Excluded Directories
+
+Shadow cloning skips:
+- `.git` (version control)
+- `.curd` (CURD metadata)
+- Build artifacts from `deps::get_excluded_dirs()` (e.g., `target`, `node_modules`)
+
+## Session Recovery
+
+If CURD crashes during an active session, the next invocation automatically recovers:
+
+```rust
+fn load_head(&mut self) {
+    let head = self.head_path();
+    if head.exists() {
+        let state = serde_json::from_str::<TransactionState>(&json)?;
+        let shadow_dir = self.workspace_root
+            .join(".curd")
+            .join("shadow")
+            .join(&state.active_uuid);
+        if shadow_dir.exists() {
+            self.shadow_root = Some(shadow_dir);
+            self.active = true;
+            // Restore staged files and base hashes
+        }
+    }
+}
+```
+
+<Note>
+Recovered sessions preserve all staged changes and base snapshots.
+</Note>
+
+## Workspace Actions
+
+Complete list of workspace actions:
+
+- `status`: Show active session state
+- `list`: List all tracked files
+- `dependencies`: Show detected workspace dependencies
+- `begin`: Start shadow workspace session
+- `diff`: Show staged changes
+- `commit`: Apply changes to workspace
+- `rollback`: Discard shadow state
+- `alerts`: Show architectural review findings
+
+## Integration with Scripts
+
+From `.curd` scripts, session requirements are declared:
+
+```curd
+use session required
+
+atomic {
+  edit uri="src/lib.rs::alpha" action="upsert" code=$patch
+  verify_impact strict=true
+}
+```
+
+The script runtime ensures a session is active before executing mutating operations.

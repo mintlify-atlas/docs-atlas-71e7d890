@@ -1,0 +1,485 @@
+---
+title: 'Control Flow'
+description: 'Sequence, atomic, abort, and parallel constructs'
+---
+
+## Overview
+
+CURD scripts support control flow constructs to organize and control execution:
+
+- **sequence** - Execute statements in order (default behavior)
+- **atomic** - Execute statements as a transaction
+- **abort** - Stop execution with a reason
+- **parallel** - Concurrent execution (parsed but not yet supported)
+
+## Sequence Blocks
+
+Sequence blocks execute statements in order. This is the default behavior, so explicit `sequence` blocks are primarily for documentation and organization.
+
+### Syntax
+
+```curd
+sequence name {
+  statement1
+  statement2
+  statement3
+}
+```
+
+The name is optional:
+
+```curd
+sequence {
+  read $target
+  verify_impact strict=true
+}
+```
+
+### Example: Named Workflow Stages
+
+```curd
+# explain: three-stage refactoring workflow
+use session required
+
+arg target_uri: string
+
+let patch = """
+pub fn validate() {
+    // Updated implementation
+}
+"""
+
+sequence analysis {
+  read $target_uri
+  graph uri=$target_uri direction="both" depth=2
+}
+
+sequence modification {
+  edit uri=$target_uri code=$patch action="upsert"
+}
+
+sequence verification {
+  verify_impact strict=true
+}
+```
+
+### Execution Order
+
+Statements execute sequentially, waiting for each to complete:
+
+```curd
+sequence {
+  search "AuthToken"              # Executes first
+  read "src/auth.rs::validate"   # Waits for search
+  verify_impact strict=true       # Waits for read
+}
+```
+
+## Atomic Blocks
+
+Atomic blocks execute statements as a transaction. If any statement fails, the entire block should be rolled back (when supported by the runtime).
+
+### Syntax
+
+```curd
+atomic name {
+  statement1
+  statement2
+  statement3
+}
+```
+
+### Example: Safe Mutation
+
+```curd
+use session required
+
+arg target_uri: string
+let patch = "pub fn alpha() {}"
+
+atomic apply_fix {
+  edit uri=$target_uri code=$patch action="upsert"
+  verify_impact strict=true
+}
+```
+
+If `verify_impact` fails, the `edit` should be rolled back.
+
+### Example: Multi-Step Refactor
+
+```curd
+# explain: rename function and update callers
+use session required
+
+let new_impl = """
+pub fn authenticate(token: &str) -> bool {
+    validate_token(token)
+}
+"""
+
+atomic rename_and_update {
+  # Update main definition
+  edit uri="src/auth.rs::auth" code=$new_impl action="replace"
+  
+  # Update caller
+  edit uri="src/api.rs::handle_request" 
+       code="authenticate(token)" 
+       action="replace"
+  
+  # Verify all changes are safe
+  verify_impact strict=true
+}
+```
+
+<Note>
+  Atomic blocks are compiled into the plan artifact with transaction semantics. The actual rollback behavior depends on workspace session support.
+</Note>
+
+### Nested Atomic Blocks
+
+```curd
+sequence main {
+  read $target
+  
+  atomic phase1 {
+    edit uri="src/auth.rs" code=$patch1
+    verify_impact strict=true
+  }
+  
+  atomic phase2 {
+    edit uri="src/session.rs" code=$patch2
+    verify_impact strict=true
+  }
+}
+```
+
+Each atomic block is independent. If `phase2` fails, `phase1` changes are already committed.
+
+## Abort Statements
+
+Abort stops execution immediately with a reason.
+
+### Syntax
+
+```curd
+abort "reason string"
+abort $variable
+```
+
+### Example: Conditional Abort Pattern
+
+```curd
+# explain: abort if target is in critical path
+arg target_uri: string
+arg allow_critical: bool = false
+
+read $target_uri
+graph uri=$target_uri direction="callers" depth=1
+
+# In practice, you'd check the graph result
+# This demonstrates the syntax
+abort "Target is in critical path and allow_critical=false"
+```
+
+### Example: Safety Check
+
+```curd
+arg target_uri: string
+
+let is_production = true  # Would be computed from environment
+
+sequence safety_check {
+  read $target_uri
+  
+  # If in production, abort
+  abort "Cannot modify production code without review"
+}
+```
+
+<Warning>
+  Abort statements cannot currently be compiled into executable plan artifacts. They are parsed but will cause a compilation error.
+</Warning>
+
+## Parallel Blocks (Future)
+
+Parallel blocks will execute statements concurrently when the runtime supports it.
+
+### Syntax (Not Yet Executable)
+
+```curd
+parallel name {
+  statement1
+  statement2
+  statement3
+}
+```
+
+### Example (Parsed but Rejected)
+
+```curd
+# This parses but fails at compile/execute time
+parallel fanout {
+  search "AuthToken"
+  search "SessionToken"
+  search "RefreshToken"
+}
+```
+
+Error:
+```
+Error: parallel blocks are not executable yet; current CURD runtime 
+only lowers .curd scripts to sequential DslNode IR
+```
+
+<Warning>
+  `parallel` is parsed but rejected at compile/execute time until the runtime has honest parallel lowering.
+</Warning>
+
+## Block Nesting
+
+Blocks can be nested to organize complex workflows:
+
+```curd
+sequence main {
+  sequence gather_context {
+    search "auth"
+    read "src/auth.rs::validate"
+    graph uri="src/auth.rs::validate" depth=2
+  }
+  
+  atomic apply_changes {
+    edit uri="src/auth.rs::validate" code=$patch
+    verify_impact strict=true
+  }
+  
+  sequence verify_results {
+    read "src/auth.rs::validate"
+  }
+}
+```
+
+## Control Flow Patterns
+
+### Pattern 1: Read-Modify-Verify
+
+```curd
+arg target_uri: string
+let patch = "..."
+
+sequence safe_edit {
+  # Read current state
+  read $target_uri
+  
+  # Check impact
+  graph uri=$target_uri direction="both" depth=1
+  
+  # Apply in atomic block
+  atomic {
+    edit uri=$target_uri code=$patch action="upsert"
+    verify_impact strict=true
+  }
+}
+```
+
+### Pattern 2: Staged Rollout
+
+```curd
+arg targets: array
+
+let patch = "..."
+
+sequence stage1 {
+  atomic {
+    edit uri="src/module1.rs" code=$patch
+    verify_impact strict=true
+  }
+}
+
+sequence stage2 {
+  atomic {
+    edit uri="src/module2.rs" code=$patch
+    verify_impact strict=true
+  }
+}
+```
+
+### Pattern 3: Analysis Before Mutation
+
+```curd
+arg target_uri: string
+let code = "..."
+
+sequence analyze {
+  search "related_symbol"
+  read $target_uri
+  graph uri=$target_uri direction="both" depth=2
+}
+
+sequence mutate {
+  atomic apply {
+    edit uri=$target_uri code=$code
+    verify_impact strict=true
+  }
+}
+```
+
+## Execution Semantics
+
+### Sequential Execution
+
+By default, statements execute one after another:
+
+```curd
+read "src/lib.rs::alpha"     # Step 1
+read "src/lib.rs::beta"      # Step 2 (waits for step 1)
+read "src/lib.rs::gamma"     # Step 3 (waits for step 2)
+```
+
+### Dependencies in Compiled Plans
+
+When compiled to plan artifacts, each statement becomes a node with dependencies:
+
+```json
+{
+  "nodes": [
+    {
+      "id": "uuid-1",
+      "op": { "tool": "read", "args": {...} },
+      "dependencies": []
+    },
+    {
+      "id": "uuid-2",
+      "op": { "tool": "read", "args": {...} },
+      "dependencies": ["uuid-1"]
+    },
+    {
+      "id": "uuid-3",
+      "op": { "tool": "verify_impact", "args": {...} },
+      "dependencies": ["uuid-2"]
+    }
+  ]
+}
+```
+
+## Error Handling
+
+When a statement fails:
+
+1. **Outside atomic block**: Execution stops, no rollback
+2. **Inside atomic block**: Entire block should rollback (workspace-dependent)
+3. **With abort**: Execution stops immediately with reason
+
+### Example: Error Propagation
+
+```curd
+sequence {
+  read "src/lib.rs::alpha"   # Succeeds
+  read "nonexistent::symbol" # Fails - execution stops here
+  verify_impact strict=true  # Never executes
+}
+```
+
+### Example: Atomic Rollback Intent
+
+```curd
+atomic {
+  edit uri="src/auth.rs" code=$patch1
+  edit uri="src/session.rs" code=$patch2
+  verify_impact strict=true  # If this fails, both edits should rollback
+}
+```
+
+## Block Names in Artifacts
+
+Block names appear in compiled plan artifacts for traceability:
+
+```curd
+atomic apply_security_fix {
+  edit uri="src/auth.rs::validate" code=$patch
+  verify_impact strict=true
+}
+```
+
+Compiled artifact includes:
+
+```json
+{
+  "node_artifacts": [
+    {
+      "tool": "edit",
+      "block": "apply_security_fix",
+      "explainability": {...}
+    }
+  ]
+}
+```
+
+<Tip>
+  Use descriptive block names to improve plan artifact readability and auditability.
+</Tip>
+
+## Best Practices
+
+<AccordionGroup>
+  <Accordion title="Use Atomic for Mutations">
+    Wrap related mutations in atomic blocks for transaction semantics:
+    ```curd
+    atomic {
+      edit uri=$target code=$patch
+      verify_impact strict=true
+    }
+    ```
+  </Accordion>
+  
+  <Accordion title="Name Important Blocks">
+    Named blocks improve artifact readability:
+    ```curd
+    sequence analysis { ... }
+    atomic apply_fix { ... }
+    sequence verify { ... }
+    ```
+  </Accordion>
+  
+  <Accordion title="Keep Atomic Blocks Small">
+    Smaller atomic blocks are easier to reason about and debug:
+    ```curd
+    # Good: focused atomic block
+    atomic update_auth {
+      edit uri="src/auth.rs" code=$patch
+      verify_impact strict=true
+    }
+    
+    # Less good: too many unrelated operations
+    atomic everything {
+      edit uri="src/auth.rs" code=$patch1
+      edit uri="src/db.rs" code=$patch2
+      edit uri="src/api.rs" code=$patch3
+      verify_impact strict=true
+    }
+    ```
+  </Accordion>
+  
+  <Accordion title="Analyze Before Mutating">
+    Read and graph before editing:
+    ```curd
+    read $target
+    graph uri=$target depth=2
+    
+    atomic {
+      edit uri=$target code=$patch
+      verify_impact strict=true
+    }
+    ```
+  </Accordion>
+</AccordionGroup>
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Tool Calls" icon="wrench" href="/scripting/tool-calls">
+    Learn which tools to use in your control flow
+  </Card>
+  <Card title="Best Practices" icon="stars" href="/scripting/best-practices">
+    Explainability, safety patterns, and governance
+  </Card>
+</CardGroup>

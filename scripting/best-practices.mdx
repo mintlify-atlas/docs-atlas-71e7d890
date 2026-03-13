@@ -1,0 +1,736 @@
+---
+title: 'Best Practices'
+description: 'Explainability, safety patterns, session management, and governance'
+---
+
+## Explainability Comments
+
+Structured comments are preserved into compiled metadata, making plan artifacts self-documenting.
+
+### Supported Directives
+
+CURD extracts these structured comments:
+
+- `# explain:` - High-level purpose (single occurrence)
+- `# why:` - Reasoning (can appear multiple times)
+- `# risk:` - Known risks (can appear multiple times)
+- `# review:` - Review requirements (can appear multiple times)
+- `# tag:` - Classification tags (can appear multiple times)
+
+### Example: Complete Explainability
+
+```curd
+# explain: tighten auth validation without changing the public entrypoint
+# why: downstream callers depend on the current function name
+# why: security audit found weakness in empty token handling
+# risk: auth and session modules are tightly connected
+# risk: change could impact rate limiting logic
+# review: security team approval required
+# review: test coverage must be maintained
+# tag: security
+# tag: authentication
+# tag: high-priority
+
+use session required
+
+let patch = """
+pub fn validate(token: &str) -> bool {
+    !token.is_empty()
+}
+"""
+
+atomic {
+  edit uri="src/auth.rs::validate" action="upsert" code=$patch
+  verify_impact strict=true
+}
+```
+
+### In Compiled Artifacts
+
+These comments appear in the plan artifact:
+
+```json
+{
+  "explainability": {
+    "explain": "tighten auth validation without changing the public entrypoint",
+    "why": [
+      "downstream callers depend on the current function name",
+      "security audit found weakness in empty token handling"
+    ],
+    "risk": [
+      "auth and session modules are tightly connected",
+      "change could impact rate limiting logic"
+    ],
+    "review": [
+      "security team approval required",
+      "test coverage must be maintained"
+    ],
+    "tag": [
+      "security",
+      "authentication",
+      "high-priority"
+    ]
+  }
+}
+```
+
+<Tip>
+  Use explainability comments liberally. They cost nothing at runtime but make auditing and debugging much easier.
+</Tip>
+
+## Session Management
+
+Workspace sessions provide safe mutation with rollback capability.
+
+### Session Directive
+
+Declare session requirements in scripts:
+
+```curd
+use session required
+```
+
+Values:
+- `required` - Enforce session before execution
+- `optional` - Recommended but not enforced
+
+### Session-Requiring Tools
+
+These tools always require an active session:
+
+- `edit` - Source code modification
+- `mutate` - Advanced mutations
+- `manage_file` - File operations
+- `shell` - Shell commands (when destructive)
+- `build` - Build commands
+- `execute_plan` - Plan execution
+- `execute_dsl` - DSL execution
+
+### Session Workflow
+
+```bash
+# 1. Begin session
+curd workspace begin
+
+# 2. Execute mutating operations
+curd run script.curd
+
+# 3. Review changes
+curd workspace diff
+
+# 4. Commit or rollback
+curd workspace commit
+# OR
+curd workspace rollback
+```
+
+### Session Best Practices
+
+<AccordionGroup>
+  <Accordion title="Always Use Sessions for Mutations">
+    Never run mutating scripts without a session:
+    ```bash
+    # Good
+    curd workspace begin
+    curd run fix.curd
+    curd workspace commit
+    
+    # Bad: will error
+    curd run fix.curd  # No session
+    ```
+  </Accordion>
+  
+  <Accordion title="Review Before Commit">
+    Always check what changed:
+    ```bash
+    curd workspace diff
+    ```
+  </Accordion>
+  
+  <Accordion title="Rollback Failed Changes">
+    If something goes wrong:
+    ```bash
+    curd workspace rollback
+    ```
+  </Accordion>
+  
+  <Accordion title="One Session Per Logical Unit">
+    Don't mix unrelated changes in one session:
+    ```bash
+    # Good: separate sessions
+    curd workspace begin && curd run fix_auth.curd && curd workspace commit
+    curd workspace begin && curd run fix_session.curd && curd workspace commit
+    
+    # Less good: mixed changes
+    curd workspace begin
+    curd run fix_auth.curd
+    curd run fix_session.curd
+    curd workspace commit
+    ```
+  </Accordion>
+</AccordionGroup>
+
+## Safety Patterns
+
+### Pattern 1: Always Verify After Edit
+
+```curd
+atomic {
+  edit uri=$target code=$patch action="upsert"
+  verify_impact strict=true
+}
+```
+
+Don't skip verification:
+
+```curd
+# Bad: no verification
+edit uri=$target code=$patch
+
+# Good: verified
+atomic {
+  edit uri=$target code=$patch
+  verify_impact strict=true
+}
+```
+
+### Pattern 2: Read Context Before Edit
+
+```curd
+sequence safe_edit {
+  # Gather context
+  read $target_uri
+  graph uri=$target_uri direction="both" depth=2
+  
+  # Apply with full understanding
+  atomic {
+    edit uri=$target_uri code=$patch action="upsert"
+    verify_impact strict=true
+  }
+}
+```
+
+### Pattern 3: Use Atomic Blocks for Related Changes
+
+```curd
+# Good: atomic transaction
+atomic rename {
+  edit uri="src/auth.rs::old_name" code=$new_impl action="replace"
+  edit uri="src/api.rs::caller" code=$updated_call action="replace"
+  verify_impact strict=true
+}
+```
+
+Vs:
+
+```curd
+# Bad: non-atomic, partial failure possible
+edit uri="src/auth.rs::old_name" code=$new_impl action="replace"
+edit uri="src/api.rs::caller" code=$updated_call action="replace"
+verify_impact strict=true
+```
+
+### Pattern 4: Parameterize for Reusability
+
+```curd
+# Reusable script
+arg target_uri: string
+arg strict: bool = true
+
+let patch = "..."
+
+atomic {
+  edit uri=$target_uri code=$patch action="upsert"
+  verify_impact strict=$strict
+}
+```
+
+Compile for different targets:
+
+```bash
+curd run compile fix.curd --target-uri "src/auth.rs::validate"
+curd run compile fix.curd --target-uri "src/session.rs::create"
+```
+
+### Pattern 5: Staged Rollout
+
+```curd
+# Apply changes incrementally
+sequence stage1_low_risk {
+  atomic {
+    edit uri="src/utils.rs::helper" code=$patch
+    verify_impact strict=true
+  }
+}
+
+sequence stage2_medium_risk {
+  atomic {
+    edit uri="src/api.rs::handler" code=$patch
+    verify_impact strict=true
+  }
+}
+
+sequence stage3_high_risk {
+  atomic {
+    edit uri="src/core.rs::critical" code=$patch
+    verify_impact strict=true
+  }
+}
+```
+
+## Safeguards in Compiled Artifacts
+
+When you compile a script, CURD analyzes it and adds safeguards:
+
+```json
+{
+  "safeguards": {
+    "session_required": true,
+    "mutation_targets": [
+      "src/auth.rs::validate",
+      "src/session.rs::create"
+    ],
+    "recommended_actions": [
+      "open a workspace session before execution",
+      "compile to a plan artifact before mutating execution",
+      "review target overlap before executing multi-target changes",
+      "run verify_impact after each mutating block",
+      "use plan edit to tune retry_limit and output_limit before promotion"
+    ]
+  }
+}
+```
+
+### Automatic Safeguard Detection
+
+CURD analyzes your script:
+
+1. **Session Detection**: Checks if tools require sessions
+2. **Mutation Target Extraction**: Lists all URIs being modified
+3. **Recommendation Generation**: Suggests safety measures
+
+### Manual Safeguard Tuning
+
+After compilation, edit the plan artifact:
+
+```bash
+curd plan edit <plan-id>
+```
+
+You can adjust:
+- Profile (stricter capability limits)
+- `output_limit` (per-node or default)
+- `retry_limit` (per-node or default)
+
+## Profile Selection
+
+Profiles control tool availability and execution constraints.
+
+### In Scripts
+
+```curd
+use profile supervised
+```
+
+### At Compile Time
+
+Override at compilation:
+
+```bash
+curd run compile script.curd --profile ci_strict
+```
+
+### Profile Best Practices
+
+<AccordionGroup>
+  <Accordion title="Use Stricter Profiles for Production">
+    Development:
+    ```curd
+    use profile default
+    ```
+    
+    Production:
+    ```curd
+    use profile ci_strict
+    ```
+  </Accordion>
+  
+  <Accordion title="Match Profile to Risk Level">
+    Low-risk read operations:
+    ```curd
+    use profile default
+    ```
+    
+    High-risk mutations:
+    ```curd
+    use profile supervised
+    ```
+  </Accordion>
+</AccordionGroup>
+
+## Governance Workflow
+
+For teams requiring approval before execution:
+
+### 1. Author Scripts with Full Context
+
+```curd
+# explain: fix critical security vulnerability
+# why: current validation is insufficient
+# risk: auth module is critical infrastructure
+# review: security team approval required
+# tag: security, critical, high-priority
+
+use profile supervised
+use session required
+
+arg target_uri: string = "src/auth.rs::validate"
+
+let security_fix = "..."
+
+sequence analysis {
+  read $target_uri
+  graph uri=$target_uri direction="both" depth=2
+}
+
+sequence apply {
+  atomic {
+    edit uri=$target_uri code=$security_fix action="upsert"
+    verify_impact strict=true
+  }
+}
+```
+
+### 2. Compile to Reviewable Artifact
+
+```bash
+curd run check security_fix.curd
+curd run compile security_fix.curd
+```
+
+This creates `.curd/plans/<id>.json` with:
+- Full explainability metadata
+- Bound arguments
+- Safeguards
+- Mutation targets
+- Recommended actions
+
+### 3. Review Artifact
+
+Reviewers can inspect:
+
+```bash
+cat .curd/plans/<id>.json | jq '.explainability'
+cat .curd/plans/<id>.json | jq '.safeguards'
+cat .curd/plans/<id>.json | jq '.node_artifacts'
+```
+
+### 4. Optional: Tune Plan
+
+```bash
+curd plan edit <plan-id>
+```
+
+Strengthen constraints:
+- Use stricter profile
+- Lower output limits
+- Reduce retries
+
+### 5. Execute Under Governance
+
+```bash
+curd workspace begin
+curd run security_fix.curd
+curd workspace diff
+# Review diff with team
+curd workspace commit
+```
+
+## Script Organization
+
+### File Naming
+
+Use descriptive names:
+
+```
+fix_auth_validation.curd
+refactor_error_handling.curd
+update_api_endpoints.curd
+```
+
+### Script Structure
+
+Organize consistently:
+
+```curd
+# 1. Explainability header
+# explain: ...
+# why: ...
+# risk: ...
+# review: ...
+# tag: ...
+
+# 2. Directives
+use profile supervised
+use session required
+
+# 3. Arguments
+arg target_uri: string
+arg strict: bool = true
+
+# 4. Variables
+let patch = "..."
+let config = {...}
+
+# 5. Workflow
+sequence analysis {
+  # ...
+}
+
+sequence apply {
+  # ...
+}
+
+sequence verify {
+  # ...
+}
+```
+
+### Version Control
+
+Commit `.curd` scripts:
+
+```bash
+git add *.curd
+git commit -m "Add authentication fix script"
+```
+
+Plan artifacts are workspace-local (`.curd/plans/`) and typically not committed.
+
+## Common Pitfalls
+
+<Warning>
+  **Pitfall 1: Skipping Verification**
+  
+  Always verify after edits:
+  ```curd
+  atomic {
+    edit uri=$target code=$patch
+    verify_impact strict=true  # Don't skip this!
+  }
+  ```
+</Warning>
+
+<Warning>
+  **Pitfall 2: No Session for Mutations**
+  
+  Always use sessions:
+  ```bash
+  curd workspace begin
+  curd run mutating_script.curd
+  curd workspace commit
+  ```
+</Warning>
+
+<Warning>
+  **Pitfall 3: Missing Explainability**
+  
+  Document intent:
+  ```curd
+  # explain: what and why
+  # risk: what could go wrong
+  # review: who should approve
+  ```
+</Warning>
+
+<Warning>
+  **Pitfall 4: Large Atomic Blocks**
+  
+  Keep atomic blocks focused:
+  ```curd
+  # Good: small, focused
+  atomic fix_one_thing {
+    edit uri=$target code=$patch
+    verify_impact strict=true
+  }
+  
+  # Bad: too many unrelated changes
+  atomic fix_everything {
+    edit uri="module1" code=$patch1
+    edit uri="module2" code=$patch2
+    edit uri="module3" code=$patch3
+    verify_impact strict=true
+  }
+  ```
+</Warning>
+
+<Warning>
+  **Pitfall 5: Not Using Arguments**
+  
+  Make scripts reusable:
+  ```curd
+  # Good: parameterized
+  arg target_uri: string
+  edit uri=$target_uri code=$patch
+  
+  # Bad: hardcoded
+  edit uri="src/auth.rs::validate" code=$patch
+  ```
+</Warning>
+
+## Checklist for Production Scripts
+
+<Steps>
+  <Step title="Explainability">
+    - [ ] `explain:` describes purpose
+    - [ ] `why:` provides reasoning
+    - [ ] `risk:` documents risks
+    - [ ] `review:` specifies approval needs
+    - [ ] `tag:` classifies the change
+  </Step>
+  
+  <Step title="Session Management">
+    - [ ] `use session required` for mutations
+    - [ ] Script will be run in workspace session
+    - [ ] Changes will be reviewed before commit
+  </Step>
+  
+  <Step title="Profile Selection">
+    - [ ] Appropriate profile selected
+    - [ ] Profile matches environment (dev/prod)
+    - [ ] Profile enforces required constraints
+  </Step>
+  
+  <Step title="Safety Patterns">
+    - [ ] Context gathered before mutations
+    - [ ] Mutations wrapped in atomic blocks
+    - [ ] Verification after each mutation
+    - [ ] Related changes in single atomic block
+  </Step>
+  
+  <Step title="Parameterization">
+    - [ ] Reusable targets as arguments
+    - [ ] Sensible defaults provided
+    - [ ] Type annotations on arguments
+  </Step>
+  
+  <Step title="Testing">
+    - [ ] Script checked with `curd run check`
+    - [ ] Script compiled successfully
+    - [ ] Dry-run in test environment
+    - [ ] Changes reviewed and approved
+  </Step>
+</Steps>
+
+## Example: Production-Ready Script
+
+```curd
+# explain: fix critical authentication vulnerability in token validation
+# why: security audit revealed insufficient signature verification
+# why: empty tokens were incorrectly accepted as valid
+# risk: auth module is critical security boundary
+# risk: changes affect all authentication flows
+# review: security team approval required
+# review: QA must verify all auth flows
+# tag: security
+# tag: critical
+# tag: authentication
+
+use profile supervised
+use session required
+
+arg target_uri: string = "src/auth.rs::validate"
+arg strict_verification: bool = true
+
+let security_patch = """
+pub fn validate(token: &str) -> Result<bool, AuthError> {
+    // Reject empty tokens immediately
+    if token.is_empty() {
+        return Err(AuthError::EmptyToken);
+    }
+    
+    // Verify cryptographic signature
+    if !verify_signature(token) {
+        return Err(AuthError::InvalidSignature);
+    }
+    
+    // Check expiration
+    if is_expired(token) {
+        return Err(AuthError::Expired);
+    }
+    
+    Ok(true)
+}
+"""
+
+sequence gather_context {
+  # Search for related authentication code
+  search query="token validation"
+  
+  # Read current implementation
+  read $target_uri
+  
+  # Analyze dependencies
+  graph uri=$target_uri direction="both" depth=2
+}
+
+sequence apply_security_fix {
+  atomic critical_update {
+    edit uri=$target_uri 
+         code=$security_patch 
+         action="upsert"
+    verify_impact strict=$strict_verification
+  }
+}
+
+sequence verify_fix {
+  # Re-read to confirm changes
+  read $target_uri
+  
+  # Run authentication tests
+  shell "cargo test auth::validate"
+  shell "cargo test auth::integration"
+  shell "cargo clippy --all-targets"
+}
+```
+
+**Execution:**
+
+```bash
+# 1. Check and compile
+curd run check security_fix.curd
+curd run compile security_fix.curd
+
+# 2. Review artifact (team)
+cat .curd/plans/<id>.json | jq '.explainability'
+cat .curd/plans/<id>.json | jq '.safeguards'
+
+# 3. Execute with approval
+curd workspace begin
+curd run security_fix.curd
+curd workspace diff
+# Team reviews diff
+curd workspace commit
+
+# 4. Deploy and monitor
+```
+
+## Summary
+
+<CardGroup cols={2}>
+  <Card title="Always Explain" icon="comment">
+    Use structured comments to document intent, risks, and review needs.
+  </Card>
+  
+  <Card title="Session Management" icon="shield">
+    Always use workspace sessions for mutations. Review before commit.
+  </Card>
+  
+  <Card title="Safety Patterns" icon="triangle-exclamation">
+    Read context, use atomic blocks, verify after edits.
+  </Card>
+  
+  <Card title="Governance" icon="gavel">
+    Compile to reviewable artifacts. Tune safeguards. Execute under approval.
+  </Card>
+</CardGroup>

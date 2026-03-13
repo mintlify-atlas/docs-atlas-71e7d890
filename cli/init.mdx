@@ -1,0 +1,205 @@
+---
+title: curd init
+description: Initialize CURD workspace with automatic build system detection
+---
+
+## Overview
+
+The `curd init` command initializes a CURD workspace in your repository by creating the `.curd/` directory structure and automatically detecting your build system, source layout, and dependency ecosystem.
+
+```bash
+curd init [root]
+```
+
+## Usage
+
+```bash
+# Initialize in current directory
+curd init
+
+# Initialize in specific directory
+curd init /path/to/project
+
+# Using alias
+curd ini .
+```
+
+## Arguments
+
+<ParamField path="root" type="string" default=".">
+  Path to the workspace root directory to initialize
+</ParamField>
+
+## What It Does
+
+When you run `curd init`, CURD:
+
+1. **Creates `.curd/` directory structure**:
+   - `.curd/settings.toml` - Workspace configuration
+   - `.curd/index/` - Symbol index cache
+   - `.curd/plans/` - Compiled plan artifacts
+   - `.curd/traces/` - Operation history
+
+2. **Auto-detects build system**:
+   - Cargo (Rust)
+   - CMake, Ninja, Make (C/C++)
+   - npm, yarn, pnpm, bun (JavaScript/TypeScript)
+   - pip, poetry, uv (Python)
+   - gradle, maven (Java)
+   - go modules (Go)
+   - bazel, meson, buck2
+
+3. **Scans source layout**:
+   - Identifies primary source directories
+   - Detects language distributions
+   - Maps dependency patterns
+
+4. **Configures indexing**:
+   - Sets default index mode (lazy or full)
+   - Configures file size limits
+   - Establishes language parsers
+
+## After Initialization
+
+Once initialized, verify your workspace with:
+
+```bash
+# Run diagnostics and build index
+curd doctor
+
+# Check workspace status
+curd status
+```
+
+## Directory Structure
+
+After initialization:
+
+```
+your-project/
+├── .curd/
+│   ├── settings.toml       # Configuration
+│   ├── index/              # Symbol cache
+│   │   └── symbols.db
+│   ├── plans/              # Compiled artifacts
+│   ├── traces/             # Operation history
+│   └── shadow/             # Transaction workspace (when active)
+├── src/
+└── ...
+```
+
+## Configuration
+
+The generated `settings.toml` contains:
+
+```toml
+[runtime]
+ceiling = "full"
+
+[index]
+mode = "lazy"              # or "full"
+scope = "auto"             # or "forced"
+max_file_size = 1048576    # 1MB
+large_file_policy = "skip" # or "skeleton", "full"
+
+[profiles.default]
+role = "human_developer"
+capabilities = ["lookup", "traverse", "read", "change.apply", "session.begin", "session.verify"]
+session_required_for_change = true
+```
+
+See [settings.toml reference](/cli/settings) for full configuration options.
+
+## Examples
+
+### Rust Project
+
+```bash
+cd my-rust-project
+curd init
+# Auto-detects Cargo.toml and configures Rust indexing
+```
+
+### Python Project
+
+```bash
+cd my-python-app
+curd init
+# Auto-detects pyproject.toml, setup.py, or requirements.txt
+```
+
+### Monorepo
+
+```bash
+cd monorepo-root
+curd init
+# Detects multiple build systems and languages
+```
+
+## Re-initialization
+
+Running `curd init` on an existing CURD workspace:
+- Preserves existing `.curd/` data
+- Updates configuration if build system changed
+- Does **not** delete history or plans
+
+To completely remove CURD:
+
+```bash
+curd delete --yes
+```
+
+## Plugin Detection
+
+If language or tool plugins are installed (`.curdl`, `.curdt`), `curd init` will also:
+- Detect plugin-contributed build metadata
+- Configure plugin-specific indexing extensions
+- Register custom adapters
+
+See [Plugin System](/advanced/plugin-system) for details.
+
+## Troubleshooting
+
+### Build System Not Detected
+
+If your build system isn't auto-detected:
+
+1. Manually configure in `.curd/settings.toml`:
+   ```toml
+   [build]
+   adapter = "make"  # or your build tool
+   ```
+
+2. Use custom commands:
+   ```bash
+   curd build --command "./my-build-script.sh"
+   ```
+
+### Index Build Fails
+
+If the initial index fails:
+
+```bash
+# Run doctor with diagnostics
+curd doctor --profile ci_fast
+
+# Check for parse errors
+curd test nodes --verbose
+```
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Run Diagnostics" icon="stethoscope" href="/cli/doctor">
+    Validate indexing and build first index
+  </Card>
+  <Card title="Search Symbols" icon="magnifying-glass" href="/cli/search">
+    Start exploring your codebase
+  </Card>
+  <Card title="Configure Settings" icon="gear" href="/cli/settings">
+    Customize workspace behavior
+  </Card>
+  <Card title="Set Up Profiles" icon="user-shield" href="/cli/profiles">
+    Configure agent capabilities
+  </Card>
+</CardGroup>

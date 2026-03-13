@@ -1,0 +1,433 @@
+---
+title: Workflow Automation
+description: Author .curd scripts for repeatable workflows with check, compile, edit, and run lifecycle
+---
+
+CURD separates authoring from execution using `.curd` source scripts and compiled plan artifacts. This enables readable workflows for humans while maintaining governed execution for teams.
+
+## Why Scripts and Plans
+
+<Note>
+`.curd` is the authoring layer — easy for humans and agents to write.
+
+Compiled plan artifacts are the execution layer — enriched with metadata, safeguards, and bound arguments.
+</Note>
+
+This separation provides:
+- Readable reusable workflows
+- Explainability metadata  
+- Safeguards and impact analysis
+- Stable execution history
+- Governance-ready audit trail
+
+## `.curd` Script Syntax
+
+The source language supports:
+
+- `use profile <name>`: Select execution profile
+- `use session required`: Enforce workspace session
+- `arg`: Parameterized arguments  
+- `let`: Variable binding
+- Multiline strings with `"""`
+- Tool-call statements
+- `sequence`: Sequential execution
+- `atomic`: Transactional block
+- `abort`: Early termination
+
+<Warning>
+`parallel` is parsed but rejected at compile time until the runtime supports true parallel execution.
+</Warning>
+
+## Script Lifecycle
+
+Complete workflow from authoring to execution:
+
+<Steps>
+  <Step title="Check">
+    Graph-aware preflight without mutation
+    
+    ```bash
+    curd run check fix_auth.curd
+    ```
+    
+    Reports:
+    - Resolved targets
+    - Graph-adjacent impact
+    - Conflict risk
+    - Session requirement
+    - Suggested safeguards
+  </Step>
+  
+  <Step title="Compile">
+    Emit plan artifact with metadata
+    
+    ```bash
+    curd run compile fix_auth.curd
+    ```
+    
+    Creates `.curd/plans/<plan-id>.json` containing:
+    - Compiled DSL/plan payload
+    - Source hash
+    - Bound argument values
+    - Explainability metadata
+    - Safeguards
+    - Runtime ceiling snapshot
+  </Step>
+  
+  <Step title="Edit Plan">
+    Adjust execution defaults
+    
+    ```bash
+    curd plan edit <plan-id>
+    ```
+    
+    Guided edits for:
+    - Profile selection
+    - Output limits (default and per-node)
+    - Retry limits (default and per-node)
+  </Step>
+  
+  <Step title="Execute">
+    Run with session enforcement
+    
+    ```bash
+    curd workspace begin
+    curd run fix_auth.curd
+    curd workspace commit
+    ```
+  </Step>
+</Steps>
+
+## Authoring Scripts
+
+### Basic Script Structure
+
+```curd
+# explain: tighten auth validation without changing public entrypoint
+# why: downstream callers depend on the current function name
+# risk: auth and session modules are tightly connected
+
+use session required
+
+let patch = """
+pub fn validate(token: &str) -> bool {
+    !token.is_empty()
+}
+"""
+
+atomic {
+  edit uri="src/auth.rs::validate" action="upsert" code=$patch
+  verify_impact strict=true
+}
+```
+
+### Explainability Comments
+
+Structured comments are preserved into compiled metadata:
+
+- `# explain:` High-level purpose
+- `# why:` Motivation and context
+- `# risk:` Known concerns or constraints  
+- `# review:` Review guidance
+- `# tag:` Categorization labels
+
+<Tip>
+Explainability comments become part of the plan artifact, helping reviewers and future maintainers understand intent.
+</Tip>
+
+## Arguments and Variables
+
+### Declaring Arguments
+
+Arguments make scripts reusable:
+
+```curd
+arg target_uri: string
+arg strict: bool = true
+
+let patch = """
+pub fn alpha() {}
+"""
+
+edit uri=$target_uri action="upsert" code=$patch
+verify_impact strict=$strict
+```
+
+### Binding Arguments at Compile Time
+
+```bash
+curd run check fix.curd --target-uri src/lib.rs::alpha
+curd run compile fix.curd --target-uri src/lib.rs::alpha --strict false
+```
+
+Each bound argument set produces a different plan artifact.
+
+<Note>
+Argument types: `string`, `bool`, `integer`. Default values are optional.
+</Note>
+
+## Atomic Blocks
+
+Atomic blocks enforce transactional semantics:
+
+```curd
+atomic {
+  edit uri="src/lib.rs::alpha" action="upsert" code=$patch1
+  edit uri="src/lib.rs::beta" action="upsert" code=$patch2
+  verify_impact strict=true
+}
+```
+
+If any step fails, the entire atomic block rolls back.
+
+## Sequence vs Atomic
+
+<CodeGroup>
+```curd Sequence
+sequence {
+  edit uri="src/lib.rs::alpha" action="upsert" code=$patch
+  # Continues even if edit fails
+  verify_impact strict=false
+}
+```
+
+```curd Atomic
+atomic {
+  edit uri="src/lib.rs::alpha" action="upsert" code=$patch
+  # Rolls back if edit fails
+  verify_impact strict=true
+}
+```
+</CodeGroup>
+
+- **sequence**: Best-effort execution, continues on failure
+- **atomic**: All-or-nothing, rolls back on any failure
+
+## Check: Preflight Analysis
+
+The check phase performs graph-aware impact analysis without mutation:
+
+```bash
+curd run check fix_alpha.curd
+```
+
+### Check Output
+
+```json
+{
+  "status": "ok",
+  "resolved_targets": ["src/lib.rs::alpha"],
+  "graph_impact": {
+    "callers": ["src/main.rs::main"],
+    "callees": [],
+    "depth": 2
+  },
+  "conflict_risk": "low",
+  "session_required": true,
+  "suggested_safeguards": ["verify_impact"]
+}
+```
+
+Use check to:
+- Validate URI resolution
+- Understand blast radius before execution  
+- Identify required safeguards
+- Confirm session requirements
+
+<Tip>
+Always run check before compile to catch URI typos and understand impact.
+</Tip>
+
+## Compile: Plan Generation
+
+Compilation transforms source scripts into execution artifacts:
+
+```bash
+curd run compile fix_alpha.curd
+```
+
+### Plan Artifact Structure
+
+```json
+{
+  "id": "550e8400-e29b-41d4-a716-446655440000",
+  "source_hash": "sha256:abc123...",
+  "source_path": "fix_alpha.curd",
+  "bound_arguments": {
+    "target_uri": "src/lib.rs::alpha"
+  },
+  "metadata": {
+    "explain": "tighten alpha implementation safely",
+    "why": "reduce complexity",
+    "risk": "callers depend on return type"
+  },
+  "nodes": [
+    {
+      "type": "call",
+      "tool": "edit",
+      "args": {
+        "uri": "src/lib.rs::alpha",
+        "code": "pub fn alpha() {}",
+        "action": "upsert"
+      }
+    }
+  ],
+  "safeguards": ["verify_impact"],
+  "session_required": true
+}
+```
+
+Plan artifacts are stored at `.curd/plans/<plan-id>.json`.
+
+## Edit: Adjust Plan Defaults
+
+After compilation, adjust execution parameters:
+
+```bash
+curd plan edit <plan-id>
+```
+
+### Editable Fields
+
+- **profile**: Change from default to stricter profile (e.g., `supervised`, `ci_strict`)
+- **output_limit**: Default and per-node limits for tool output
+- **retry_limit**: Default and per-node retry attempts
+
+<Note>
+Editing plans lets teams add governance constraints after authoring without modifying source scripts.
+</Note>
+
+## Execute: Run Plans
+
+For mutating scripts, execution requires an active session:
+
+```bash
+curd workspace begin
+curd run fix_alpha.curd
+curd workspace commit
+```
+
+For read-only scripts (no session requirement):
+
+```bash
+curd run analyze.curd
+```
+
+### Execution Flow
+
+<Steps>
+  <Step title="Load Plan">
+    Read compiled artifact or compile on-the-fly from source
+  </Step>
+  
+  <Step title="Validate Session">
+    If session required, check for active shadow workspace
+  </Step>
+  
+  <Step title="Execute Nodes">
+    Run tool calls through validation and capability checks
+  </Step>
+  
+  <Step title="Collect Results">
+    Return structured output for each node
+  </Step>
+</Steps>
+
+## Example Workflows
+
+### Local Developer Workflow
+
+Quick iteration without plan artifacts:
+
+```bash
+curd run check fix_alpha.curd
+curd workspace begin
+curd run fix_alpha.curd
+curd workspace diff
+curd workspace commit
+```
+
+### Team Workflow
+
+Governance-focused with plan review:
+
+```bash
+# Author checks impact
+curd run check fix_alpha.curd
+
+# Generate plan artifact  
+curd run compile fix_alpha.curd
+
+# Team lead adjusts execution constraints
+curd plan edit <plan-id>
+
+# Execute with session
+curd workspace begin
+curd run fix_alpha.curd
+curd workspace commit
+```
+
+### Parameterized Workflow
+
+Reusable script with different targets:
+
+```curd
+arg target_uri: string
+arg action: string = "upsert"
+
+edit uri=$target_uri action=$action code=$patch
+```
+
+```bash
+curd run compile fix.curd --target-uri src/lib.rs::alpha
+curd run compile fix.curd --target-uri src/lib.rs::beta
+# Generates two plan artifacts
+```
+
+## Trust Model
+
+<Warning>
+`.curd` files are normal source files with no special privileges.
+
+Compiled plan artifacts are the governed execution objects.
+</Warning>
+
+- Humans and agents author `.curd` scripts
+- CURD compiles and enriches with metadata
+- Safeguards are added after impact analysis is visible
+- Plan artifacts provide audit trail and governance hooks
+
+## Plan Hardening Rules
+
+The plan runtime enforces safety bounds:
+
+- Node count limits
+- Dependency fan-in limits
+- Retry bounds
+- Output compaction limits  
+- Duplicate node ID rejection
+- Unsupported command rejection
+- Session enforcement for mutations
+
+<Tip>
+These limits prevent runaway execution and ensure plans are reviewable.
+</Tip>
+
+## When to Use Scripts vs Direct Tools
+
+**Use `.curd` scripts when you want:**
+- Repeatable workflows  
+- Parameterized mutations
+- Explainability metadata
+- Team review and governance
+- Multi-step atomic operations
+
+**Use direct tools when you want:**
+- One-off exploration
+- Interactive investigation
+- Immediate feedback
+- Rapid prototyping
+
+From GETTING_STARTED:
+
+> Most coding tools make you choose between fast but sloppy local automation and governed but heavy enterprise automation. CURD aims to keep the source layer light while making the execution layer explicit.

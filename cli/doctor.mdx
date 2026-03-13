@@ -1,0 +1,582 @@
+---
+title: curd doctor
+description: Indexing diagnostics, performance profiling, and regression testing
+---
+
+## Overview
+
+The `curd doctor` command runs built-in diagnostics for indexing, performance, and semantic integrity. It validates index quality, measures performance, and catches regressions.
+
+```bash
+curd doctor [options]
+```
+
+Aliases: `curd dct`, `curd index`, `curd idx`
+
+## Usage
+
+```bash
+# Basic diagnostics
+curd doctor
+
+# With strict validation
+curd doctor --strict
+
+# CI profile
+curd doctor --profile ci_fast
+
+# Performance profiling
+curd doctor --profile-index
+
+# Parity check (run twice, compare)
+curd doctor --parity-rerun
+
+# Compare with full index
+curd doctor --compare-with-full
+```
+
+## Options
+
+<ParamField path="root" type="PathBuf" default=".">
+  Path to workspace root
+</ParamField>
+
+### Validation Options
+
+<ParamField path="--strict" type="boolean">
+  Fail with non-zero status when warnings/findings are present.
+  
+  Without --strict, doctor reports issues but exits 0.
+  With --strict, exits non-zero if any threshold violated.
+</ParamField>
+
+<ParamField path="--profile" type="string">
+  Threshold profile to apply: `ci_fast` or `ci_strict`.
+  
+  Profiles define acceptable ranges for metrics:
+  - `ci_fast` - Relaxed thresholds for quick checks
+  - `ci_strict` - Tight thresholds for release validation
+  
+  Overrides workspace settings.
+</ParamField>
+
+### Threshold Options
+
+Manually specify thresholds:
+
+<ParamField path="--max-total-ms" type="integer">
+  Fail if index build time exceeds this (milliseconds)
+</ParamField>
+
+<ParamField path="--max-parse-fail" type="integer">
+  Fail if parse failures exceed this count
+</ParamField>
+
+<ParamField path="--max-no-symbols-ratio" type="float">
+  Fail if (files with 0 symbols / total files) exceeds this ratio (0.0-1.0)
+</ParamField>
+
+<ParamField path="--max-skipped-large-ratio" type="float">
+  Fail if (skipped large files / total files) exceeds this ratio
+</ParamField>
+
+<ParamField path="--min-coverage-ratio" type="float">
+  Fail if coverage ratio below this value
+</ParamField>
+
+<ParamField path="--require-coverage-state" type="string">
+  Fail if coverage state doesn't match exactly (e.g., 'full')
+</ParamField>
+
+<ParamField path="--min-symbol-count" type="integer">
+  Fail if total symbols indexed below this count
+</ParamField>
+
+<ParamField path="--min-symbols-per-k-files" type="float">
+  Fail if symbol density below this value
+</ParamField>
+
+<ParamField path="--min-overlap-with-full" type="float">
+  Fail if overlap with full index below this ratio (when comparing)
+</ParamField>
+
+### Analysis Options
+
+<ParamField path="--parity-rerun" type="boolean">
+  Run index build twice and ensure symbol counts and hashes match exactly.
+  
+  Validates deterministic indexing.
+</ParamField>
+
+<ParamField path="--compare-with-full" type="boolean">
+  Compare current index against a 'full' mode run.
+  
+  Measures lazy index coverage vs. complete index.
+</ParamField>
+
+<ParamField path="--profile-index" type="boolean">
+  Run indexing multiple times to generate performance profile.
+  
+  Outputs timing statistics and bottlenecks.
+</ParamField>
+
+### Index Configuration Overrides
+
+<ParamField path="--index-mode" type="string">
+  Index mode for this run: `lazy` or `full`.
+  
+  Overrides workspace settings.
+</ParamField>
+
+<ParamField path="--index-scope" type="string">
+  Index scope: `auto` or `forced`
+</ParamField>
+
+<ParamField path="--index-max-file-size" type="integer">
+  Maximum file size in bytes to index
+</ParamField>
+
+<ParamField path="--index-large-file-policy" type="string">
+  Policy for large files: `skip`, `skeleton`, or `full`
+</ParamField>
+
+<ParamField path="--index-execution" type="string">
+  Execution model: `multithreaded`, `multiprocess`, or `singlethreaded`
+</ParamField>
+
+<ParamField path="--index-chunk-size" type="integer">
+  Chunk size for multiprocess mode
+</ParamField>
+
+### Output Options
+
+<ParamField path="--report-out" type="PathBuf">
+  Write full report as JSON to this path.
+  
+  Example:
+  ```bash
+  curd doctor --report-out report.json
+  ```
+</ParamField>
+
+## Output
+
+### Human Summary
+
+```bash
+$ curd doctor
+
+=== CURD Doctor Report ===
+
+[Index Statistics]
+  Total Files:        1,248
+  Files Indexed:      1,205
+  Parse Failures:     3
+  No Symbols:         40
+  Skipped Large:      0
+  
+  Total Symbols:      12,450
+  Symbol Density:     28.3 symbols/KLoC
+  
+  Build Time:         2,340ms
+  Cache Hits:         892
+  
+[Coverage]
+  Coverage Ratio:     96.5%
+  Coverage State:     high
+  
+[Findings]
+  ✓ Parse failures within acceptable range (3 < 10)
+  ✓ Symbol density healthy (28.3 > 10.0)
+  ⚠️  3 files failed to parse - review for syntax errors
+  
+✓ Index health: GOOD
+```
+
+### JSON Report
+
+```bash
+curd doctor --report-out report.json
+```
+
+Output file:
+```json
+{
+  "index_stats": {
+    "total_files": 1248,
+    "cache_hits": 892,
+    "parse_fail": 3,
+    "no_symbols": 40,
+    "skipped_large": 0,
+    "total_symbols": 12450,
+    "total_ms": 2340
+  },
+  "coverage": {
+    "coverage_ratio": 0.965,
+    "coverage_state": "high",
+    "symbol_density": 28.3
+  },
+  "thresholds": {
+    "max_total_ms": null,
+    "max_parse_fail": 10,
+    "min_coverage_ratio": 0.8,
+    "violations": []
+  },
+  "human_summary": "..."
+}
+```
+
+## Diagnostic Profiles
+
+### ci_fast
+
+Quick validation for CI pipelines:
+
+```toml
+[doctor.profiles.ci_fast]
+max_parse_fail = 10
+max_no_symbols_ratio = 0.1
+min_coverage_ratio = 0.8
+min_symbol_count = 100
+```
+
+Usage:
+```bash
+curd doctor --profile ci_fast --strict
+```
+
+### ci_strict
+
+Rigorous validation for releases:
+
+```toml
+[doctor.profiles.ci_strict]
+max_parse_fail = 0
+max_no_symbols_ratio = 0.05
+min_coverage_ratio = 0.95
+min_symbol_count = 1000
+require_coverage_state = "full"
+```
+
+Usage:
+```bash
+curd doctor --profile ci_strict --strict
+```
+
+## Analysis Modes
+
+### Parity Check
+
+Ensure deterministic indexing:
+
+```bash
+curd doctor --parity-rerun
+```
+
+Runs index build twice, compares:
+- Symbol counts
+- Symbol hashes
+- File coverage
+
+Fails if any mismatch detected.
+
+### Full Index Comparison
+
+Compare lazy vs. full indexing:
+
+```bash
+curd doctor --compare-with-full
+```
+
+Builds two indexes:
+1. Current mode (e.g., lazy)
+2. Full mode
+
+Reports:
+- Overlap percentage
+- Missing symbols in current mode
+- Coverage delta
+
+### Performance Profiling
+
+Measure indexing performance:
+
+```bash
+curd doctor --profile-index
+```
+
+Runs multiple iterations:
+- Cold start (no cache)
+- Warm start (with cache)
+- Incremental updates
+
+Outputs:
+- Mean/median/p95 timings
+- Bottlenecks
+- Cache hit rates
+
+## Use Cases
+
+### CI/CD Pipeline
+
+```yaml
+# .github/workflows/curd.yml
+steps:
+  - name: CURD Diagnostics
+    run: |
+      curd init
+      curd doctor --profile ci_fast --strict
+```
+
+Fails build if index quality degrades.
+
+### Pre-Release Validation
+
+```bash
+# Strict validation before release
+curd doctor --profile ci_strict --strict --report-out release-report.json
+```
+
+### Performance Regression Detection
+
+```bash
+# Profile indexing performance
+curd doctor --profile-index --report-out perf-baseline.json
+
+# Later, compare
+curd doctor --profile-index --report-out perf-current.json
+diff perf-baseline.json perf-current.json
+```
+
+### Index Mode Tuning
+
+```bash
+# Compare lazy vs. full
+curd doctor --index-mode lazy --report-out lazy-report.json
+curd doctor --index-mode full --report-out full-report.json
+
+# Analyze trade-offs
+jq '.index_stats' lazy-report.json
+jq '.index_stats' full-report.json
+```
+
+## Thresholds
+
+Doctor validates against thresholds:
+
+### Time Thresholds
+
+```bash
+# Fail if indexing takes > 5 seconds
+curd doctor --max-total-ms 5000 --strict
+```
+
+### Quality Thresholds
+
+```bash
+# Fail if parse failures > 5
+curd doctor --max-parse-fail 5 --strict
+
+# Fail if coverage < 90%
+curd doctor --min-coverage-ratio 0.9 --strict
+
+# Fail if symbol count < 1000
+curd doctor --min-symbol-count 1000 --strict
+```
+
+### Coverage Requirements
+
+```bash
+# Require full coverage
+curd doctor --require-coverage-state full --strict
+```
+
+## Findings
+
+Doctor reports findings:
+
+### Parse Failures
+
+Files that failed to parse:
+```
+⚠️  3 files failed to parse:
+  - src/broken.rs (line 45: unexpected token)
+  - tests/malformed.rs (line 12: missing semicolon)
+  - build/generated.rs (line 234: syntax error)
+```
+
+Fix:
+```bash
+# Review syntax errors
+# Fix or exclude from indexing
+```
+
+### Low Symbol Density
+
+Files with few symbols:
+```
+⚠️  Symbol density low: 5.2 symbols/KLoC
+     Expected: > 10.0
+```
+
+Possible causes:
+- Many non-code files indexed
+- Configuration files
+- Generated code
+
+Fix:
+```toml
+# .curd/settings.toml
+[index]
+exclude_patterns = ["build/**", "generated/**"]
+```
+
+### Large Files Skipped
+
+```
+⚠️  5 files skipped due to size (> 1MB):
+  - src/large_generated.rs (2.4 MB)
+  - data/constants.rs (1.8 MB)
+```
+
+Fix:
+```toml
+[index]
+max_file_size = 5242880  # 5MB
+large_file_policy = "skeleton"  # Or "full"
+```
+
+## Configuration
+
+Doctor behavior configured in `.curd/settings.toml`:
+
+```toml
+[index]
+mode = "lazy"  # or "full"
+scope = "auto"
+max_file_size = 1048576  # 1MB
+large_file_policy = "skip"
+execution = "multithreaded"
+chunk_size = 100
+
+exclude_patterns = [
+  "target/**",
+  "build/**",
+  "node_modules/**"
+]
+
+[doctor.thresholds]
+max_parse_fail = 10
+max_no_symbols_ratio = 0.1
+min_coverage_ratio = 0.8
+
+[doctor.profiles.ci_fast]
+max_parse_fail = 20
+min_coverage_ratio = 0.7
+
+[doctor.profiles.ci_strict]
+max_parse_fail = 0
+min_coverage_ratio = 0.95
+require_coverage_state = "full"
+```
+
+See [settings reference](/cli/settings) for details.
+
+## Error Handling
+
+### Threshold Violation
+
+```bash
+$ curd doctor --max-parse-fail 0 --strict
+
+ERROR: Threshold violation
+  Parse failures: 3 (max: 0)
+  
+Index build completed but failed validation.
+
+Exit code: 1
+```
+
+### Index Build Failure
+
+```bash
+$ curd doctor
+
+ERROR: Index build failed
+  Tree-sitter parser not found for: .rs files
+  
+Install language plugins or check configuration.
+```
+
+## Troubleshooting
+
+### High Parse Failure Rate
+
+```bash
+$ curd doctor --verbose
+
+⚠️  15% of files failed to parse
+```
+
+Debug:
+```bash
+# List parse failures
+curd test nodes --verbose
+
+# Check if files are actually code
+file src/broken.rs
+
+# Exclude non-source files
+# Edit .curd/settings.toml [index] exclude_patterns
+```
+
+### Low Coverage
+
+```bash
+$ curd doctor
+
+Coverage Ratio: 45%
+```
+
+Fix:
+```bash
+# Switch to full indexing
+curd doctor --index-mode full
+
+# Or configure in settings
+# [index] mode = "full"
+```
+
+### Slow Indexing
+
+```bash
+$ curd doctor
+
+Build Time: 45,000ms
+```
+
+Optimize:
+```bash
+# Use multiprocess
+curd doctor --index-execution multiprocess --index-chunk-size 50
+
+# Exclude large directories
+# Edit .curd/settings.toml [index] exclude_patterns
+```
+
+## Related Commands
+
+<CardGroup cols={2}>
+  <Card title="status" icon="chart-line" href="/cli/workspace#status">
+    Check current index stats
+  </Card>
+  <Card title="test" icon="vial" href="/cli/workspace#semantic-tests">
+    Run semantic integrity tests
+  </Card>
+  <Card title="settings" icon="gear" href="/cli/settings">
+    Configure indexing behavior
+  </Card>
+  <Card title="init" icon="rocket" href="/cli/init">
+    Initialize workspace
+  </Card>
+</CardGroup>

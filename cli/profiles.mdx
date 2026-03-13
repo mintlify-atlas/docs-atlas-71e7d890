@@ -1,0 +1,720 @@
+---
+title: Profile Configuration
+description: Agent capability profiles with capability atoms and role-based access control
+---
+
+## Overview
+
+Profiles define what agents and users can do in a CURD workspace. They map roles to capability atoms, enforce session requirements, and control privilege escalation.
+
+Profiles are configured in `.curd/settings.toml` under `[profiles.*]` sections.
+
+## Profile Structure
+
+```toml
+[profiles.profile_name]
+role = "role_identifier"
+capabilities = ["atom1", "atom2", ...]
+session_required_for_change = true
+promotion = "forbidden"
+```
+
+## Built-In Profiles
+
+### default (Human Developer)
+
+Full access for human developers:
+
+```toml
+[profiles.default]
+role = "human_developer"
+capabilities = [
+  "lookup",
+  "traverse",
+  "read",
+  "change.apply",
+  "session.begin",
+  "session.verify",
+  "session.commit",
+  "exec.task"
+]
+session_required_for_change = true
+promotion = "forbidden"
+```
+
+**Use for**: Local development by humans
+
+### assist (Read-Only Agent)
+
+Minimal access for assistant agents:
+
+```toml
+[profiles.assist]
+role = "assist_agent"
+capabilities = [
+  "lookup",
+  "read"
+]
+session_required_for_change = true
+promotion = "forbidden"
+```
+
+**Use for**: Search and navigation assistants, documentation bots
+
+### supervised (Supervised Agent)
+
+Controlled mutation with review:
+
+```toml
+[profiles.supervised]
+role = "supervised_agent"
+capabilities = [
+  "lookup",
+  "traverse",
+  "read",
+  "change.apply",
+  "session.begin",
+  "session.verify",
+  "exec.task",
+  "plan.execute",
+  "review.run"
+]
+session_required_for_change = true
+promotion = "approval_required"
+```
+
+**Use for**: Agents that make changes but require human approval
+
+### autonomous (Autonomous Agent)
+
+Full automation with commit rights:
+
+```toml
+[profiles.autonomous]
+role = "autonomous_agent"
+capabilities = [
+  "lookup",
+  "traverse",
+  "read",
+  "change.apply",
+  "session.begin",
+  "session.commit",
+  "session.rollback",
+  "exec.task",
+  "exec.command",
+  "plan.execute",
+  "review.run",
+  "plugin.manage"
+]
+session_required_for_change = false
+promotion = "forbidden"
+```
+
+**Use for**: Trusted automation, CI/CD, internal agents
+
+## Capability Atoms
+
+Capabilities are fine-grained permissions:
+
+### Lookup & Navigation
+
+<ParamField path="lookup" type="capability">
+  Search and index querying
+  
+  **Tools**: `search`
+</ParamField>
+
+<ParamField path="traverse" type="capability">
+  Graph traversal and dependency exploration
+  
+  **Tools**: `graph`, `diagram`
+</ParamField>
+
+### Read Operations
+
+<ParamField path="read" type="capability">
+  Read files and symbols
+  
+  **Tools**: `read`
+</ParamField>
+
+<ParamField path="read.context" type="capability">
+  Read from linked external contexts
+  
+  **Tools**: `context` (list)
+</ParamField>
+
+### Change Operations
+
+<ParamField path="change.apply" type="capability">
+  Apply code mutations
+  
+  **Tools**: `edit`, `refactor`, `manage_file`
+</ParamField>
+
+<ParamField path="change.review" type="capability">
+  Review changes and architectural impact
+  
+  **Tools**: `session` (review)
+</ParamField>
+
+### Session Management
+
+<ParamField path="session.begin" type="capability">
+  Start shadow workspace sessions
+  
+  **Tools**: `workspace` (begin)
+</ParamField>
+
+<ParamField path="session.verify" type="capability">
+  Verify and review session changes
+  
+  **Tools**: `workspace` (diff, status), `session` (review, log)
+</ParamField>
+
+<ParamField path="session.commit" type="capability">
+  Commit session changes to workspace
+  
+  **Tools**: `workspace` (commit)
+</ParamField>
+
+<ParamField path="session.rollback" type="capability">
+  Discard session changes
+  
+  **Tools**: `workspace` (rollback)
+</ParamField>
+
+### Execution
+
+<ParamField path="exec.task" type="capability">
+  Execute predefined tasks (build, test)
+  
+  **Tools**: `build`, `test` (with known adapters)
+</ParamField>
+
+<ParamField path="exec.command" type="capability">
+  Execute arbitrary shell commands
+  
+  **Tools**: `shell`, `run` (custom commands)
+  
+  **Warning**: Powerful capability. Grant carefully.
+</ParamField>
+
+### Plan Operations
+
+<ParamField path="plan.execute" type="capability">
+  Execute compiled plan artifacts
+  
+  **Tools**: `execute_plan`, `execute_dsl`
+</ParamField>
+
+<ParamField path="plan.author" type="capability">
+  Author and compile .curd scripts
+  
+  **Tools**: `run` (check, compile)
+</ParamField>
+
+### Review & Analysis
+
+<ParamField path="review.run" type="capability">
+  Run semantic integrity tests
+  
+  **Tools**: `test`, `doctor`
+</ParamField>
+
+<ParamField path="review.impact" type="capability">
+  Analyze architectural impact
+  
+  **Tools**: `verify_impact`, `session` (review)
+</ParamField>
+
+### Plugin Management
+
+<ParamField path="plugin.manage" type="capability">
+  Install/remove plugin packages
+  
+  **Tools**: `plugin_language`, `plugin_tool`
+</ParamField>
+
+<ParamField path="plugin.trust" type="capability">
+  Manage plugin signing keys
+  
+  **Tools**: `plugin_trust`
+  
+  **Warning**: Human-only capability. Should not be granted to agents.
+</ParamField>
+
+### Configuration
+
+<ParamField path="config.read" type="capability">
+  Read workspace configuration
+  
+  **Tools**: `config` (show)
+</ParamField>
+
+<ParamField path="config.write" type="capability">
+  Modify workspace configuration
+  
+  **Tools**: `config` (set, unset)
+  
+  **Warning**: Should not be granted to agents without approval.
+</ParamField>
+
+## Profile Options
+
+### role
+
+Descriptive role identifier:
+
+```toml
+role = "supervised_agent"
+```
+
+Used for logging and audit trails.
+
+### capabilities
+
+Array of capability atoms:
+
+```toml
+capabilities = [
+  "lookup",
+  "read",
+  "change.apply"
+]
+```
+
+**Validation**:
+- Tools check if required capability is present
+- Missing capability \u2192 `PROFILE_DENIED` error
+
+### session_required_for_change
+
+Enforce session for mutations:
+
+```toml
+session_required_for_change = true
+```
+
+When `true`:
+- `edit`, `refactor`, `manage_file` require active session
+- `execute_plan`, `execute_dsl` with mutating steps require session
+- Attempts without session fail with `SESSION_REQUIRED` error
+
+When `false`:
+- Mutations allowed without session (use carefully!)
+- Suitable for autonomous agents in controlled environments
+
+### promotion
+
+Control privilege escalation:
+
+```toml
+promotion = "forbidden"          # No escalation
+promotion = "approval_required"  # Human approval needed
+promotion = "allowed"            # Automatic escalation
+```
+
+**Options**:
+
+<ParamField path="forbidden" type="promotion">
+  Profile cannot be changed during session.
+  
+  Agent stuck with initial profile.
+</ParamField>
+
+<ParamField path="approval_required" type="promotion">
+  Profile change requires human approval.
+  
+  Agent can request escalation, human must approve.
+</ParamField>
+
+<ParamField path="allowed" type="promotion">
+  Profile can be changed freely.
+  
+  **Warning**: Allows self-escalation. Use with caution.
+</ParamField>
+
+## Tool-to-Capability Mapping
+
+| Tool | Required Capability | Session Required |
+|------|---------------------|------------------|
+| `search` | `lookup` | No |
+| `read` | `read` | No |
+| `graph` | `traverse` | No |
+| `edit` | `change.apply` | Yes (if profile requires) |
+| `refactor` | `change.apply` | Yes (if profile requires) |
+| `workspace` (begin) | `session.begin` | No |
+| `workspace` (commit) | `session.commit` | Yes |
+| `workspace` (rollback) | `session.rollback` | Yes |
+| `workspace` (status) | `session.verify` | No |
+| `build` | `exec.task` | No |
+| `shell` | `exec.command` | No |
+| `execute_plan` | `plan.execute` | If mutating |
+| `execute_dsl` | `plan.execute` | If mutating |
+| `test` | `review.run` | No |
+| `doctor` | `review.run` | No |
+| `plugin_language` | `plugin.manage` | No |
+| `plugin_tool` | `plugin.manage` | No |
+| `plugin_trust` | `plugin.trust` | No |
+| `config` (show) | `config.read` | No |
+| `config` (set/unset) | `config.write` | No |
+
+## Runtime Ceiling Interaction
+
+Profiles cannot exceed runtime ceiling:
+
+```toml
+[runtime]
+ceiling = "lite"  # Restricts available tools
+
+[profiles.default]
+# Even if profile grants these capabilities,
+# they're unavailable in 'lite' mode:
+capabilities = [
+  "lookup",      # Available in lite
+  "read",        # Available in lite
+  "change.apply", # Available in lite
+  "exec.task"    # NOT available in lite (blocked by ceiling)
+]
+```
+
+**Lite mode allows**:
+- `lookup`, `read`, `traverse`, `change.apply`
+- `session.begin`, `session.verify`
+- `workspace` (status, list, dependencies)
+
+**Lite mode blocks**:
+- `exec.*`, `plan.*`, `plugin.*`, `config.*`
+- `build`, `test`, `doctor`
+- Most management operations
+
+## Custom Profiles
+
+Define custom profiles for specific use cases:
+
+### ci_agent (CI/CD Pipeline)
+
+```toml
+[profiles.ci_agent]
+role = "ci_pipeline"
+capabilities = [
+  "lookup",
+  "read",
+  "exec.task",
+  "review.run"
+]
+session_required_for_change = true
+promotion = "forbidden"
+```
+
+Usage:
+```bash
+# In CI pipeline
+curd doctor --profile ci_agent --strict
+curd build --profile ci_agent
+curd test all --profile ci_agent
+```
+
+### code_reviewer (Review Bot)
+
+```toml
+[profiles.code_reviewer]
+role = "review_bot"
+capabilities = [
+  "lookup",
+  "traverse",
+  "read",
+  "review.run",
+  "review.impact"
+]
+session_required_for_change = true
+promotion = "forbidden"
+```
+
+Usage:
+```bash
+# In review workflow
+curd test architecture --profile code_reviewer
+curd graph src/changes.rs::new_func --depth 3 --profile code_reviewer
+```
+
+### refactor_agent (Refactoring Assistant)
+
+```toml
+[profiles.refactor_agent]
+role = "refactor_assistant"
+capabilities = [
+  "lookup",
+  "traverse",
+  "read",
+  "change.apply",
+  "session.begin",
+  "session.verify",
+  "review.impact"
+]
+session_required_for_change = true
+promotion = "approval_required"
+```
+
+## Profile Selection
+
+### Default Profile
+
+Without explicit selection, `profiles.default` is used:
+
+```toml
+[profiles.default]
+role = "human_developer"
+capabilities = [...]
+```
+
+### CLI Override
+
+Specify profile for command:
+
+```bash
+curd run script.curd --profile supervised
+curd build --profile ci_agent
+```
+
+### Script Declaration
+
+Declare required profile in `.curd` script:
+
+```curd
+use profile supervised
+
+# Script body...
+```
+
+If current profile insufficient:
+```bash
+$ curd run script.curd
+Error: PROFILE_DENIED: Script requires 'supervised' profile
+Current profile: 'assist'
+```
+
+### MCP Profile
+
+MCP agents use profile from settings or per-request override:
+
+```json
+{
+  "method": "tools/call",
+  "params": {
+    "name": "edit",
+    "arguments": {
+      "profile": "supervised",
+      ...
+    }
+  }
+}
+```
+
+## Validation
+
+Profile validation on tool call:
+
+1. **Ceiling check**: Tool available in current ceiling?
+2. **Profile check**: Profile has required capability?
+3. **Session check**: Session active if required?
+4. **Policy check**: Operation allowed by policy?
+
+Failure at any step \u2192 Error returned
+
+## Examples
+
+### Minimal Assistant
+
+```toml
+[profiles.minimal]
+role = "search_assistant"
+capabilities = ["lookup", "read"]
+session_required_for_change = true
+promotion = "forbidden"
+```
+
+Can only search and read. Perfect for documentation bots.
+
+### Supervised Developer
+
+```toml
+[profiles.supervised_dev]
+role = "supervised_developer"
+capabilities = [
+  "lookup",
+  "traverse",
+  "read",
+  "change.apply",
+  "session.begin",
+  "session.verify",
+  "review.run"
+]
+session_required_for_change = true
+promotion = "approval_required"
+```
+
+Can mutate code but requires sessions. Can request escalation.
+
+### Full Automation
+
+```toml
+[profiles.automation]
+role = "automation_agent"
+capabilities = [
+  "lookup",
+  "traverse",
+  "read",
+  "change.apply",
+  "session.begin",
+  "session.commit",
+  "session.rollback",
+  "exec.task",
+  "plan.execute",
+  "review.run"
+]
+session_required_for_change = false
+promotion = "forbidden"
+```
+
+Full autonomy. Suitable for trusted internal automation.
+
+## Troubleshooting
+
+### Profile Denied Error
+
+```bash
+$ curd edit src/lib.rs::func --code "..."
+Error: PROFILE_DENIED: 'assist' profile cannot execute 'change.apply'
+```
+
+Solutions:
+1. Switch profile:
+   ```bash
+   curd edit ... --profile supervised
+   ```
+
+2. Update profile capabilities:
+   ```toml
+   [profiles.assist]
+   capabilities = ["lookup", "read", "change.apply"]
+   ```
+
+3. Create custom profile with needed capabilities
+
+### Session Required Error
+
+```bash
+$ curd edit src/lib.rs::func --code "..."
+Error: SESSION_REQUIRED: edit requires active workspace session
+```
+
+Solutions:
+1. Start session:
+   ```bash
+   curd workspace begin
+   curd edit ...
+   curd workspace commit
+   ```
+
+2. Disable session requirement (careful!):
+   ```toml
+   [profiles.default]
+   session_required_for_change = false
+   ```
+
+### Ceiling Denied Error
+
+```bash
+$ curd build --profile default
+Error: CEILING_DENIED: 'build' not available in 'lite' mode
+```
+
+Solution:
+```toml
+[runtime]
+ceiling = "full"
+```
+
+## Best Practices
+
+### 1. Principle of Least Privilege
+
+Grant minimum capabilities needed:
+
+```toml
+# Good: Specific capabilities
+[profiles.reader]
+capabilities = ["lookup", "read"]
+
+# Avoid: Over-privileged
+[profiles.reader]
+capabilities = ["lookup", "read", "change.apply", "exec.command"]
+```
+
+### 2. Require Sessions for Mutations
+
+Always require sessions for agents:
+
+```toml
+[profiles.supervised]
+session_required_for_change = true  # Required!
+```
+
+Exception: Highly trusted automation in isolated environments.
+
+### 3. Restrict Promotion
+
+Prevent self-escalation:
+
+```toml
+promotion = "forbidden"  # Default for most profiles
+```
+
+Only use `approval_required` or `allowed` when necessary.
+
+### 4. Separate Profiles by Role
+
+Create distinct profiles:
+
+```toml
+[profiles.assist]       # Read-only assistant
+[profiles.developer]    # Developer with mutations
+[profiles.ci]           # CI/CD automation
+[profiles.reviewer]     # Code review bot
+```
+
+Don't reuse profiles across different roles.
+
+### 5. Audit Logging
+
+Profile information logged to `.curd/traces/`:
+
+```json
+{
+  "profile": "supervised",
+  "role": "supervised_agent",
+  "operation": "edit",
+  "timestamp": "..."
+}
+```
+
+Review logs to detect misuse or needed adjustments.
+
+## Related Documentation
+
+<CardGroup cols={2}>
+  <Card title="Settings" icon="gear" href="/cli/settings">
+    Complete settings.toml reference
+  </Card>
+  <Card title="MCP" icon="plug" href="/cli/mcp">
+    Agent integration via MCP
+  </Card>
+  <Card title="Workspace" icon="code-branch" href="/cli/workspace">
+    Session management
+  </Card>
+  <Card title="Control Plane" icon="shield-halved" href="/advanced/control-plane">
+    Security and policy enforcement
+  </Card>
+</CardGroup>

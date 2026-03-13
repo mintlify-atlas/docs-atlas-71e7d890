@@ -1,0 +1,509 @@
+---
+title: curd plan
+description: Manage, inspect, and execute compiled plan artifacts
+---
+
+## Overview
+
+The `curd plan` command manages compiled plan artifacts created from `.curd` scripts. Plans are the governed execution layer, containing bound arguments, safeguards, and explainability metadata.
+
+```bash
+curd plan <subcommand> [options]
+```
+
+Aliases: `curd p`, `curd pln`
+
+## Subcommands
+
+### List
+
+List all saved plans:
+
+```bash
+curd plan list
+```
+
+Output:
+```
+Saved Plans:
+  - 550e8400-e29b-41d4-a716-446655440000
+  - 6ba7b810-9dad-11d1-80b4-00c04fd430c8
+  - 7c9e6679-7425-40de-944b-e07fc1f90ae7
+```
+
+### Read
+
+Inspect a saved plan:
+
+```bash
+curd plan read <plan-id>
+```
+
+**Arguments**:
+<ParamField path="id" type="string" required>
+  The UUID of the plan to read
+</ParamField>
+
+Output:
+```
+Plan ID: 550e8400-e29b-41d4-a716-446655440000
+Total Nodes: 5
+Source Kind: curd_script
+Profile: supervised
+Explainability:
+  {
+    "explain": "Update authentication flow with JWT tokens",
+    "why": "Current session management doesn't scale",
+    "risk": "Breaking change for API clients",
+    "tags": ["security", "breaking-change"]
+  }
+---
+
+[Node ID: 0]
+Depends On: []
+Tool: edit
+Args: {
+  "uri": "src/auth.rs::validate",
+  "action": "upsert",
+  "code": "pub fn validate() { ... }"
+}
+---
+
+[Node ID: 1]
+Depends On: [0]
+Tool: verify_impact
+Args: {
+  "strict": true
+}
+---
+```
+
+### Edit
+
+Interactively edit plan parameters:
+
+```bash
+curd plan edit <plan-id>
+```
+
+**Arguments**:
+<ParamField path="id" type="string" required>
+  The UUID of the plan to edit
+</ParamField>
+
+Guided prompts:
+
+1. **Profile override**
+   ```
+   ? Profile override for this plan artifact: (supervised)
+   ```
+
+2. **Output limits**
+   ```
+   ? Default output_limit for all plan nodes: (65536)
+   ```
+
+3. **Retry limits**
+   ```
+   ? Default retry_limit for all plan nodes: (0)
+   ```
+
+4. **Per-node settings** (optional)
+   ```
+   ? Edit node-specific settings? (y/N)
+   ```
+
+Changes are saved to the plan artifact.
+
+### Impl (Execute)
+
+Execute a saved plan:
+
+```bash
+curd plan impl <plan-id> --session <session-id> [options]
+```
+
+**Arguments**:
+<ParamField path="id" type="string" required>
+  The UUID of the plan to execute
+</ParamField>
+
+**Options**:
+<ParamField path="--session" type="string" required>
+  The UUID of the active shadow session.
+  
+  Get from workspace status:
+  ```bash
+  SESSION=$(curd status --json | jq -r '.shadow.transaction_id')
+  curd plan impl <plan-id> --session "$SESSION"
+  ```
+</ParamField>
+
+<ParamField path="--dry-run" type="boolean">
+  Simulate execution without applying changes.
+  
+  Uses `simulate` tool to preview results:
+  ```bash
+  curd plan impl <plan-id> --session <session-id> --dry-run
+  ```
+</ParamField>
+
+<ParamField path="--root" type="string" default=".">
+  Path to workspace root
+</ParamField>
+
+## Plan Structure
+
+A compiled plan artifact (`.curd/plans/<uuid>.json`) contains:
+
+```json
+{
+  "plan": {
+    "id": "550e8400-e29b-41d4-a716-446655440000",
+    "nodes": [
+      {
+        "id": 0,
+        "op": {
+          "McpCall": {
+            "tool": "edit",
+            "args": {
+              "uri": "src/auth.rs::validate",
+              "action": "upsert",
+              "code": "..."
+            }
+          }
+        },
+        "dependencies": [],
+        "output_limit": 65536,
+        "retry_limit": 0
+      }
+    ]
+  },
+  "artifact_metadata": {
+    "source_kind": "curd_script",
+    "source_path": "scripts/fix_auth.curd",
+    "source_hash": "sha256:abc123...",
+    "metadata": {
+      "profile": "supervised",
+      "bound_arguments": {
+        "target": "src/auth.rs::validate",
+        "strict": true
+      }
+    },
+    "explainability": {
+      "explain": "Update authentication flow",
+      "why": "Scalability improvement",
+      "risk": "Breaking change",
+      "review": "Requires security approval",
+      "tags": ["security"]
+    }
+  }
+}
+```
+
+### Plan Nodes
+
+Each node contains:
+
+- **id**: Unique node identifier
+- **op**: Operation to execute (tool call or internal command)
+- **dependencies**: List of node IDs that must complete first
+- **output_limit**: Maximum output size in bytes
+- **retry_limit**: Number of retries on failure
+
+### Dependencies
+
+Nodes execute in topological order:
+
+```json
+{
+  "nodes": [
+    {"id": 0, "dependencies": []},      // Executes first
+    {"id": 1, "dependencies": [0]},     // After node 0
+    {"id": 2, "dependencies": [0]},     // After node 0 (parallel with 1)
+    {"id": 3, "dependencies": [1, 2]}   // After nodes 1 and 2
+  ]
+}
+```
+
+## Workflow
+
+### Create Plan from Script
+
+```bash
+# 1. Compile script to plan
+curd run compile fix_auth.curd --arg target="src/auth.rs::validate"
+# Returns: plan_id
+
+# 2. Read plan
+curd plan read <plan-id>
+
+# 3. Edit parameters (optional)
+curd plan edit <plan-id>
+
+# 4. Execute
+curd workspace begin
+SESSION=$(curd status --json | jq -r '.shadow.transaction_id')
+curd plan impl <plan-id> --session "$SESSION"
+curd workspace commit
+```
+
+### Dry Run Before Execution
+
+```bash
+curd workspace begin
+SESSION=$(curd status --json | jq -r '.shadow.transaction_id')
+
+# Simulate first
+curd plan impl <plan-id> --session "$SESSION" --dry-run
+
+# Review simulation output
+
+# Execute if safe
+curd plan impl <plan-id> --session "$SESSION"
+curd workspace commit
+```
+
+### Reuse Plan with Different Arguments
+
+Plans capture bound arguments. To execute with different values:
+
+1. Edit original script
+2. Compile new plan:
+   ```bash
+   curd run compile script.curd --arg target="different::symbol"
+   ```
+
+Or manually edit plan JSON (advanced).
+
+## Examples
+
+### List and Inspect
+
+```bash
+# List all plans
+curd plan list
+
+# Read specific plan
+curd plan read 550e8400-e29b-41d4-a716-446655440000
+```
+
+### Adjust Plan Settings
+
+```bash
+curd plan edit 550e8400-e29b-41d4-a716-446655440000
+
+# Guided prompts:
+# Profile: supervised
+# Output limit: 32768
+# Retry limit: 1
+# Per-node settings: No
+```
+
+### Execute Plan
+
+```bash
+# Start session
+curd workspace begin
+
+# Get session ID
+SESSION=$(curd status --json | jq -r '.shadow.transaction_id')
+
+# Execute plan
+curd plan impl 550e8400-e29b-41d4-a716-446655440000 --session "$SESSION"
+
+# Review and commit
+curd workspace diff
+curd workspace commit
+```
+
+### Simulate Execution
+
+```bash
+curd workspace begin
+SESSION=$(curd status --json | jq -r '.shadow.transaction_id')
+
+# Dry run
+curd plan impl <plan-id> --session "$SESSION" --dry-run
+
+# Output shows what would happen without applying
+```
+
+## Plan Validation
+
+Plans are validated before execution:
+
+### Node Count Limit
+
+Maximum nodes per plan (configured in settings):
+```toml
+[plan]
+max_nodes = 100
+```
+
+### Dependency Fan-In
+
+Maximum dependencies per node:
+```toml
+[plan]
+max_dependencies_per_node = 10
+```
+
+### Duplicate Node IDs
+
+Each node must have unique ID:
+```bash
+$ curd plan impl <plan-id> --session <session-id>
+Error: VALIDATION_ERROR: Duplicate node ID: 3
+```
+
+### Unsupported Commands
+
+Some internal commands restricted:
+```bash
+Error: VALIDATION_ERROR: Internal command 'clear_shadow' not allowed in plan execution
+```
+
+## Explainability Metadata
+
+Plan artifacts preserve structured comments:
+
+```json
+{
+  "explainability": {
+    "explain": "What the plan does",
+    "why": "Rationale for changes",
+    "risk": "Potential issues",
+    "review": "Approval requirements",
+    "tags": ["security", "breaking-change"]
+  }
+}
+```
+
+View with:
+```bash
+curd plan read <plan-id>
+```
+
+Use for:
+- Code review context
+- Audit trails
+- Governance documentation
+- Change management
+
+## Source Binding
+
+Plans track original source:
+
+```json
+{
+  "source_kind": "curd_script",
+  "source_path": "scripts/fix_auth.curd",
+  "source_hash": "sha256:abc123..."
+}
+```
+
+**Source validation**:
+- If source file changes, hash mismatch detected
+- Prevents stale plan execution
+- Ensures plan matches intended source
+
+## Output and Retry Limits
+
+### Output Limits
+
+Limit tool output size to prevent memory issues:
+
+```bash
+# Default: 64KB
+curd plan edit <plan-id>
+# Set output_limit: 32768 (32KB)
+```
+
+If output exceeds limit:
+- Truncated to limit
+- Warning logged
+- Execution continues
+
+### Retry Limits
+
+Automatically retry failed nodes:
+
+```bash
+curd plan edit <plan-id>
+# Set retry_limit: 2
+```
+
+Retry behavior:
+- Retries on transient failures
+- Exponential backoff
+- Gives up after retry_limit
+
+## Session Requirement
+
+Plan execution with mutating steps requires active session:
+
+```bash
+# ❌ WILL FAIL
+curd plan impl <plan-id> --session <invalid-session>
+Error: SESSION_REQUIRED: Plan contains mutating steps
+
+# ✓ CORRECT
+curd workspace begin
+SESSION=$(curd status --json | jq -r '.shadow.transaction_id')
+curd plan impl <plan-id> --session "$SESSION"
+curd workspace commit
+```
+
+## Error Handling
+
+### Plan Not Found
+
+```bash
+$ curd plan read invalid-uuid
+Error: Plan not found: invalid-uuid
+```
+
+### Invalid Session
+
+```bash
+$ curd plan impl <plan-id> --session "invalid"
+Error: Invalid session UUID format
+```
+
+### Execution Failed
+
+```bash
+$ curd plan impl <plan-id> --session <session-id>
+Error: Plan execution failed: Node 2 failed with error: Symbol not found
+
+Completed nodes: 0, 1
+Failed node: 2
+```
+
+Debug:
+```bash
+# Check plan structure
+curd plan read <plan-id>
+
+# Review node 2 operation
+# Fix issue (e.g., correct symbol URI)
+# Re-compile if needed
+```
+
+## Related Commands
+
+<CardGroup cols={2}>
+  <Card title="run" icon="play" href="/cli/run">
+    Compile scripts to plans
+  </Card>
+  <Card title="workspace" icon="code-branch" href="/cli/workspace">
+    Manage execution sessions
+  </Card>
+  <Card title="edit" icon="pen" href="/cli/edit">
+    Direct edits (alternative to plans)
+  </Card>
+  <Card title="profiles" icon="user-shield" href="/cli/profiles">
+    Configure plan execution profiles
+  </Card>
+</CardGroup>

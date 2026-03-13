@@ -1,0 +1,605 @@
+---
+title: curd repl
+description: Interactive CURD shell for semantic exploration and rapid iteration
+---
+
+## Overview
+
+The `curd repl` command starts an interactive Read-Eval-Print Loop for exploring your codebase, testing queries, and executing commands without leaving the terminal.
+
+```bash
+curd repl [root]
+```
+
+Aliases: `curd rpl`
+
+## Usage
+
+```bash
+# Start REPL in current workspace
+curd repl
+
+# Start in specific workspace
+curd repl /path/to/project
+```
+
+## Arguments
+
+<ParamField path="root" type="PathBuf" default=".">
+  Path to the workspace root
+</ParamField>
+
+## REPL Interface
+
+Once started:
+
+```
+=== CURD REPL ===
+Workspace: /path/to/project
+Type 'help' for commands, 'exit' to quit
+
+curd>
+```
+
+## Commands
+
+### search
+
+Search for symbols:
+
+```
+curd> search authenticate
+Found 5 results:
+  1. src/auth.rs::authenticate_user (function)
+  2. src/auth.rs::authenticate_token (function)
+  3. src/handlers.rs::AuthenticateRequest (struct)
+  ...
+
+curd> search login --kind function
+Found 2 results:
+  1. src/auth.rs::login
+  2. src/handlers.rs::login_handler
+```
+
+### read
+
+Read files or symbols:
+
+```
+curd> read src/auth.rs::validate_token
+pub fn validate_token(token: &str) -> Result<Claims> {
+    if token.is_empty() {
+        return Err(AuthError::EmptyToken);
+    }
+    // ... function body
+}
+
+curd> read src/config.rs
+// Full file content...
+```
+
+### graph
+
+Explore dependencies:
+
+```
+curd> graph src/auth.rs::login --depth 2
+{
+  "graph": {
+    "root": "src/auth.rs::login",
+    "nodes": [...],
+    "edges": [
+      {"from": "src/auth.rs::login", "to": "src/auth.rs::validate_token"},
+      {"from": "src/auth.rs::validate_token", "to": "src/jwt.rs::decode"}
+    ]
+  }
+}
+```
+
+### edit
+
+Mutate symbols (requires session):
+
+```
+curd> workspace begin
+Started shadow transaction: 550e8400-...
+
+curd> edit src/lib.rs::helper --code "fn helper() { println!(\"updated\"); }"
+Symbol updated successfully
+
+curd> workspace diff
+Modified files:
+  - src/lib.rs
+
+curd> workspace commit
+Committed changes to workspace
+```
+
+### workspace
+
+Manage sessions:
+
+```
+curd> workspace begin
+Started shadow transaction
+
+curd> workspace status
+[Shadow Store: ACTIVE]
+  Staged Files:
+    - src/auth.rs
+
+curd> workspace diff
+# Shows changes...
+
+curd> workspace commit
+# or: workspace rollback
+```
+
+### run
+
+Execute .curd scripts:
+
+```
+curd> run check fix_auth.curd
+{
+  "validation": "passed",
+  "resolved_targets": [...],
+  "session_required": true
+}
+
+curd> workspace begin
+curd> run fix_auth.curd
+{
+  "status": "success",
+  "nodes_executed": 5
+}
+curd> workspace commit
+```
+
+### test
+
+Run semantic tests:
+
+```
+curd> test nodes
+[Node Coverage]
+  Symbols indexed: 3,421
+  Symbol Density:  28.5 symbols/KLoC
+
+curd> test edges --verbose
+[Edge Connectivity]
+  Cohesion Ratio: 94%
+  Broken Links:   12
+```
+
+### build
+
+Trigger builds:
+
+```
+curd> build --adapter cargo
+--- CURD BUILD EXECUTION ---
+  Adapter:   cargo
+  Profile:   debug
+  ✔ Build completed successfully
+
+curd> build --plan
+--- CURD BUILD PLAN ---
+  Adapter:   cargo
+  Steps:     2
+    [1] cargo build
+    [2] cargo test
+```
+
+### config
+
+Manage configuration:
+
+```
+curd> config show
+[runtime]
+ceiling = "full"
+
+[index]
+mode = "lazy"
+...
+
+curd> config set index.mode full
+Configuration updated
+
+curd> config unset index.max_file_size
+Configuration key removed
+```
+
+### status
+
+Check workspace state:
+
+```
+curd> status
+=== CURD Workspace Status ===
+
+[Index]
+  Files Scanned: 1,248
+  Symbols:       12,450
+  Build Time:    2,340ms
+
+[Shadow Store: INACTIVE]
+  No active transaction
+```
+
+### doctor
+
+Run diagnostics:
+
+```
+curd> doctor
+=== CURD Doctor Report ===
+
+[Index Statistics]
+  Total Files:    1,248
+  Total Symbols:  12,450
+  Symbol Density: 28.3 symbols/KLoC
+  
+✓ Index health: GOOD
+```
+
+### help
+
+Show available commands:
+
+```
+curd> help
+
+Available commands:
+  search <query> [--kind <kind>]   - Search symbols
+  read <uri>                       - Read file or symbol
+  graph <uri> [--depth <n>]        - Explore dependencies
+  edit <uri> [options]             - Mutate symbol
+  workspace <action>               - Session management
+  run [mode] <script>              - Execute .curd script
+  test <scope>                     - Run semantic tests
+  build [options]                  - Trigger build
+  config <action> [args]           - Manage configuration
+  status                           - Workspace state
+  doctor [options]                 - Run diagnostics
+  clear                            - Clear screen
+  history                          - Show command history
+  exit, quit                       - Exit REPL
+```
+
+### clear
+
+Clear screen:
+
+```
+curd> clear
+```
+
+### history
+
+Show command history:
+
+```
+curd> history
+  1  search authenticate
+  2  read src/auth.rs::validate_token
+  3  graph src/auth.rs::login --depth 2
+  4  workspace begin
+  5  edit src/lib.rs::helper --code "..."
+```
+
+### exit / quit
+
+Exit REPL:
+
+```
+curd> exit
+Exiting CURD REPL
+```
+
+## Features
+
+### Command History
+
+Navigate history with arrow keys:
+- **Up arrow**: Previous command
+- **Down arrow**: Next command
+
+History persisted across sessions.
+
+### Auto-Completion
+
+Tab completion for:
+- Commands (e.g., `sea<TAB>` → `search`)
+- URIs (e.g., `src/a<TAB>` → `src/auth.rs`)
+- Flags (e.g., `--ki<TAB>` → `--kind`)
+
+### Multi-Line Input
+
+End line with `\` for continuation:
+
+```
+curd> edit src/lib.rs::func \
+      --code "fn func() { println!(\"hello\"); }"
+```
+
+### JSON Output
+
+Commands return structured data:
+
+```
+curd> search login --kind function
+{
+  "results": [
+    {
+      "symbol": "login",
+      "kind": "function",
+      "file": "src/auth.rs",
+      "line": 42,
+      "uri": "src/auth.rs::login"
+    }
+  ]
+}
+```
+
+Pipe to `jq` externally:
+```bash
+echo 'search login' | curd repl | jq '.results[0].uri'
+```
+
+### Error Messages
+
+Clear inline errors:
+
+```
+curd> edit src/missing.rs::func --code "..."
+Error: Symbol not found: src/missing.rs::func
+
+curd> workspace commit
+Error: No active shadow transaction
+```
+
+## Workflow Examples
+
+### Explore and Edit
+
+```
+curd> search deprecated
+Found 3 results:
+  1. src/api.rs::deprecated_endpoint
+  2. src/handlers.rs::old_handler
+  3. src/utils.rs::legacy_func
+
+curd> read src/api.rs::deprecated_endpoint
+pub fn deprecated_endpoint() { ... }
+
+curd> graph src/api.rs::deprecated_endpoint --depth 1
+# Check what depends on it
+
+curd> workspace begin
+curd> edit src/api.rs::deprecated_endpoint --action delete
+curd> workspace diff
+curd> workspace commit
+```
+
+### Rapid Iteration
+
+```
+curd> workspace begin
+
+curd> edit src/lib.rs::func --code "fn func() { v1 }"
+curd> build --adapter cargo
+# Error: v1 undefined
+
+curd> edit src/lib.rs::func --code "fn func() { v2 }"
+curd> build --adapter cargo
+# Error: v2 undefined
+
+curd> edit src/lib.rs::func --code "fn func() { correct }"
+curd> build --adapter cargo
+# Success!
+
+curd> workspace commit
+```
+
+### Script Development
+
+```
+curd> run check my_script.curd
+{
+  "validation": "failed",
+  "errors": ["Target not found: src/missing.rs::func"]
+}
+
+# Fix script locally
+
+curd> run check my_script.curd
+{
+  "validation": "passed"
+}
+
+curd> run compile my_script.curd
+{
+  "plan_id": "550e8400-...",
+  "path": ".curd/plans/550e8400-....json"
+}
+
+curd> workspace begin
+curd> run my_script.curd
+curd> workspace commit
+```
+
+## Configuration
+
+REPL behavior configured in `.curd/settings.toml`:
+
+```toml
+[repl]
+prompt = "curd>"              # Custom prompt
+history_file = ".curd_history" # History location
+history_limit = 1000           # Max history entries
+auto_indent = true             # Multi-line auto-indent
+color_output = true            # Colorize output
+```
+
+## Profile Enforcement
+
+REPL respects active profile:
+
+```toml
+[profiles.default]
+role = "human_developer"
+capabilities = ["lookup", "traverse", "read", "change.apply", "session.begin"]
+```
+
+Profile limitations:
+```
+curd> edit src/lib.rs::func --code "..."
+Error: PROFILE_DENIED: 'assist' profile cannot execute 'change.apply'
+```
+
+See [profiles](/cli/profiles) for configuration.
+
+## Session State
+
+REPL maintains session across commands:
+
+```
+curd> workspace begin
+Session ID: 550e8400-e29b-41d4-a716-446655440000
+
+curd> edit src/a.rs::func --code "..."
+OK
+
+curd> edit src/b.rs::func --code "..."
+OK
+
+curd> workspace status
+[Shadow Store: ACTIVE]
+  Session ID: 550e8400-e29b-41d4-a716-446655440000
+  Staged Files:
+    - src/a.rs
+    - src/b.rs
+
+curd> workspace commit
+Committed 2 files
+```
+
+## Keyboard Shortcuts
+
+- **Ctrl+C**: Cancel current input
+- **Ctrl+D**: Exit REPL
+- **Ctrl+L**: Clear screen
+- **Ctrl+R**: Reverse search history
+- **Up/Down**: Navigate history
+- **Tab**: Auto-complete
+- **Ctrl+A**: Beginning of line
+- **Ctrl+E**: End of line
+
+## Tips
+
+### Rapid Search-Read Loop
+
+```
+curd> search auth
+curd> !2     # Re-run command 2 from history
+curd> read src/auth.rs::authenticate_user
+```
+
+### Batch Operations
+
+Combine with shell:
+```bash
+cat <<EOF | curd repl
+workspace begin
+edit src/a.rs::func --code "..."
+edit src/b.rs::func --code "..."
+workspace commit
+EOF
+```
+
+### JSON Processing
+
+```
+curd> search auth > results.json
+# Process results.json externally
+# Then use URIs:
+curd> read $(jq -r '.results[0].uri' results.json)
+```
+
+## Limitations
+
+### No Interactive Prompts
+
+Overload resolution falls back to first match:
+```
+curd> read src/parser.rs::parse
+# Returns first overload, not interactive picker
+```
+
+Use CLI for interactive selection:
+```bash
+curd read "src/parser.rs::parse"
+# Interactive picker shown
+```
+
+### No Paging
+
+Long output not automatically paged:
+```
+curd> read large_file.rs
+# Full output to terminal
+```
+
+Use shell paging:
+```bash
+curd repl < commands.txt | less
+```
+
+## Error Handling
+
+### Workspace Not Initialized
+
+```
+$ curd repl
+Error: Workspace not initialized
+
+Run: curd init
+```
+
+### Invalid Command
+
+```
+curd> unknown_command
+Error: Unknown command: unknown_command
+
+Type 'help' for available commands
+```
+
+### Session Conflict
+
+```
+curd> workspace begin
+Error: SESSION_ALREADY_ACTIVE
+  Active session: 550e8400-...
+
+Commit or rollback before starting new session
+```
+
+## Related Commands
+
+<CardGroup cols={2}>
+  <Card title="mcp" icon="plug" href="/cli/mcp">
+    MCP server for AI agents
+  </Card>
+  <Card title="workspace" icon="code-branch" href="/cli/workspace">
+    Session management
+  </Card>
+  <Card title="search" icon="magnifying-glass" href="/cli/search">
+    Symbol search
+  </Card>
+  <Card title="run" icon="play" href="/cli/run">
+    Execute .curd scripts
+  </Card>
+</CardGroup>

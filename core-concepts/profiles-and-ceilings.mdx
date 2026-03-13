@@ -1,0 +1,484 @@
+---
+title: 'Profiles and Ceilings'
+description: 'Runtime ceilings (full/lite), profiles, capability atoms, and session requirements for governance'
+---
+
+CURD's capability system provides fine-grained control over what operations are allowed, using a two-layer model: **runtime ceilings** and **profiles**.
+
+## Architecture
+
+The capability gating system operates at two levels:
+
+<Steps>
+
+### Layer 1: Runtime Ceiling
+
+Hard limit on what tools are even available (`full` or `lite`)
+
+### Layer 2: Profile
+
+Defines which capability atoms the actor is allowed to invoke
+
+### Layer 3: Policy
+
+Additional runtime checks (file blocklists, session requirements, etc.)
+
+</Steps>
+
+```
+Request → Ceiling Check → Profile Check → Policy Check → Execute
+```
+
+## Runtime Ceilings
+
+CURD supports two runtime ceilings configured via `CURD_MODE` environment variable:
+
+### Full Ceiling
+
+```bash
+export CURD_MODE=full
+```
+
+Exposes the complete tool surface:
+- All search, read, graph operations
+- Full workspace mutation (edit, manage_file, shell)
+- Plan execution and DSL runtime
+- Plugin management
+- Build adapters
+
+### Lite Ceiling
+
+```bash
+export CURD_MODE=lite
+```
+
+Restrictive subset for read-only or minimal-mutation scenarios:
+
+**Allowed**:
+- `workspace` (status, list, dependencies only)
+- `search`
+- `read`
+- `edit`
+- `graph`
+- Protocol basics
+
+**Blocked**:
+- `shell` (raw command execution)
+- `build` (arbitrary build commands)
+- `plugin_tool` / `plugin_language` (installation)
+- `plugin_trust` (trust mutation)
+- Plan execution with unrestricted tools
+
+<Warning>
+Lite ceiling is a **hard gate**. Even if a profile grants capabilities, lite ceiling will deny operations outside its whitelist.
+</Warning>
+
+### Ceiling Enforcement
+
+From curd-core/src/policy.rs:306:
+
+```rust
+if input.runtime_ceiling == crate::RuntimeCeiling::Lite
+    && !matches!(
+        input.op,
+        crate::CanonicalOperationKind::Lookup
+            | crate::CanonicalOperationKind::Traverse
+            | crate::CanonicalOperationKind::Read
+            | crate::CanonicalOperationKind::Session
+    )
+{
+    return PolicyDecision::Deny(format!(
+        "CEILING_DENIED: '{}' is disabled by lite ceiling.",
+        input.tool
+    ));
+}
+```
+
+## Profiles
+
+Profiles live in `settings.toml` and define **capability atoms** and behavioral policies.
+
+### Profile Structure
+
+```toml
+[runtime]
+ceiling = "full"  # or "lite"
+
+[profiles.default]
+role = "human"
+capabilities = ["lookup", "read", "traverse", "change.apply", "exec.task"]
+session_required_for_change = false
+promotion = "allowed"
+
+[profiles.assist]
+role = "assist_agent"
+capabilities = ["lookup", "read"]
+session_required_for_change = true
+promotion = "forbidden"
+
+[profiles.supervised]
+role = "supervised_agent"
+capabilities = [
+  "lookup",
+  "traverse",
+  "read",
+  "change.apply",
+  "session.begin",
+  "session.verify",
+  "exec.task",
+  "plan.execute",
+  "review.run"
+]
+session_required_for_change = true
+promotion = "approval_required"
+
+[profiles.autonomous]
+role = "autonomous_agent"
+capabilities = [
+  "lookup",
+  "traverse",
+  "read",
+  "change.apply",
+  "change.structural",
+  "exec.command",
+  "exec.task",
+  "plan.execute",
+  "review.run",
+  "session.begin",
+  "session.commit"
+]
+session_required_for_change = true
+promotion = "allowed"
+```
+
+### Capability Atoms
+
+Capability atoms map tools to permission categories:
+
+| Tool | Capability Atom | Description |
+|------|----------------|-------------|
+| `search` | `lookup` | Symbol and text search |
+| `graph` | `traverse` | Dependency graph traversal |
+| `read` | `read` | Read file and symbol contents |
+| `edit` | `change.apply` | Modify code via structured edits |
+| `mutate` | `change.structural` | Structural refactoring |
+| `shell` | `exec.command` | Raw shell command execution |
+| `build` | `exec.task` | Managed build system invocation |
+| `plugin_tool` | `plugin.manage` | Install/remove plugin packages |
+| `plugin_trust` | `plugin.trust` | Modify trusted key registry |
+| `workspace` | `session.begin` | Start transactions |
+| `workspace` (commit) | `session.commit` | Commit transactions |
+| `execute_plan` | `plan.execute` | Execute compiled plans |
+| `review` | `review.run` | Run review hooks |
+
+<Info>
+Mapping logic is in `curd-core/src/lib.rs` (`capability_for_tool` function).
+</Info>
+
+### Profile Enforcement
+
+From curd-core/src/policy.rs:358:
+
+```rust
+if let Some(profile) = input.profile {
+    let required = crate::capability_for_tool(input.tool);
+    
+    if !profile.capabilities.is_empty()
+        && !profile.capabilities.iter().any(|cap| cap == required.as_str())
+    {
+        return PolicyDecision::Deny(format!(
+            "PROFILE_DENIED: profile '{}' lacks capability '{}'.",
+            input.profile_name.unwrap_or("default"),
+            required.as_str()
+        ));
+    }
+}
+```
+
+## Session Requirements
+
+Profiles can enforce session requirements for mutation operations:
+
+```toml
+[profiles.supervised]
+session_required_for_change = true
+```
+
+**Effect** (curd-core/src/policy.rs:373):
+
+```rust
+if profile.session_required_for_change
+    && matches!(
+        input.op,
+        crate::CanonicalOperationKind::Change | crate::CanonicalOperationKind::Exec
+    )
+    && !input.session_open
+{
+    return PolicyDecision::Deny(
+        "SESSION_REQUIRED: profile requires an open session for change/exec operations."
+    );
+}
+```
+
+<Warning>
+Agents using `supervised` or `autonomous` profiles **must** call `workspace begin` before mutation tools.
+</Warning>
+
+## Promotion Policies
+
+Profiles define promotion rules for when an agent wants to escalate privileges:
+
+- **`allowed`**: Agent can request higher-capability profile
+- **`approval_required`**: Request triggers human approval flow
+- **`forbidden`**: Agent cannot escalate under any circumstance
+
+```toml
+[profiles.assist]
+promotion = "forbidden"  # Read-only assistant cannot escalate
+
+[profiles.supervised]
+promotion = "approval_required"  # Supervised agent needs approval
+
+[profiles.autonomous]
+promotion = "allowed"  # Already highest tier
+```
+
+## Human-Only Operations
+
+Certain operations are **always** restricted to humans, regardless of profile:
+
+### Plugin Installation
+
+From curd-core/src/policy.rs:321:
+
+```rust
+if matches!(input.tool, "plugin_tool" | "plugin_language")
+    && !input.is_human
+    && matches!(
+        input.params.get("action").and_then(|v| v.as_str()),
+        Some("add" | "remove")
+    )
+{
+    return PolicyDecision::Deny(
+        "PROFILE_DENIED: plugin installation/removal is human-only."
+    );
+}
+```
+
+### Trust Registry Mutation
+
+From curd-core/src/policy.rs:334:
+
+```rust
+if input.tool == "plugin_trust"
+    && !input.is_human
+    && matches!(
+        input.params.get("action").and_then(|v| v.as_str()),
+        Some("add" | "remove" | "enable" | "disable")
+    )
+{
+    return PolicyDecision::Deny(
+        "PROFILE_DENIED: plugin trust mutation is human-only."
+    );
+}
+```
+
+<Note>
+This prevents agents from installing malicious plugins or granting trust to untrusted code.
+</Note>
+
+## Tools List Metadata
+
+CURD's `tools/list` exposes rich capability metadata for MCP clients:
+
+```json
+{
+  "tools": [
+    {
+      "name": "edit",
+      "description": "Modify code via URI-based edits",
+      "inputSchema": {...},
+      "_curd_metadata": {
+        "capability": "change.apply",
+        "canonical_op": "change",
+        "available_in_lite": true,
+        "session_hint": "required_for_agents",
+        "approval_hint": "profile_dependent"
+      }
+    },
+    {
+      "name": "shell",
+      "description": "Execute shell commands",
+      "inputSchema": {...},
+      "_curd_metadata": {
+        "capability": "exec.command",
+        "canonical_op": "exec",
+        "available_in_lite": false,
+        "session_hint": "required",
+        "approval_hint": "always"
+      }
+    }
+  ]
+}
+```
+
+<Info>
+Smart MCP clients can adapt behavior based on `_curd_metadata` instead of hardcoding tool assumptions.
+</Info>
+
+## Policy Layer
+
+Profiles are enforced through the **PolicyEngine**, which applies additional checks:
+
+### Policy Configuration
+
+```toml
+[policy]
+mode = "permissive"  # "strict", "permissive", "audit"
+block_files = ["**/secret.txt", ".env"]
+allow_files = ["src/**/*.rs", "lib/**/*.py"]
+protected_symbols = ["critical_func", "auth_entrypoint"]
+
+[policy.capabilities]
+default_mode = "permissive"
+
+[policy.change]
+max_nodes_touched = 25
+max_edges_touched = 100
+require_review_for_interface_hash_changes = true
+forbid_entrypoint_deletion = false
+
+[policy.exec]
+allow_raw_command = false
+allow_background = true
+
+[policy.hooks]
+allow_review_hooks = true
+allow_mutating_hooks = false
+```
+
+### Immutable Infrastructure Rules
+
+From curd-core/src/policy.rs:200:
+
+```rust
+if !is_human {
+    // 1. Config file protection
+    if is_config_file(path) {
+        return PolicyDecision::Deny(
+            "SECURITY_VIOLATION: AI agents are strictly forbidden from modifying CURD configuration."
+        );
+    }
+
+    // 2. Sandbox jail
+    if path.starts_with("..") || (path.is_absolute() && !path.starts_with(workspace_root)) {
+        return PolicyDecision::Deny(
+            "SANDBOX_VIOLATION: Path escapes workspace root."
+        );
+    }
+
+    // 3. Shell metacharacter blocking
+    if tool == "shell" && config.block_shell_metachars {
+        let bad_chars = [";", "&", "|", "`", "$("];
+        if cmd.contains_any(bad_chars) {
+            return PolicyDecision::Deny(
+                "SECURITY_VIOLATION: Command chaining forbidden."
+            );
+        }
+    }
+}
+```
+
+<Warning>
+These rules are **non-negotiable** and apply even to `autonomous` profiles. Agents cannot modify CURD's own configuration or escape the workspace sandbox.
+</Warning>
+
+## Recommended Operating Profiles
+
+### For Local Human Use
+
+```toml
+[runtime]
+ceiling = "full"
+
+[profiles.default]
+role = "human"
+capabilities = ["lookup", "read", "traverse", "change.apply", "exec.task", "session.begin", "session.commit"]
+session_required_for_change = false  # Humans can commit without explicit sessions
+promotion = "allowed"
+```
+
+### For Supervised Agents (e.g., Copilot)
+
+```toml
+[profiles.supervised]
+role = "supervised_agent"
+capabilities = ["lookup", "read", "traverse", "change.apply", "session.begin", "exec.task", "plan.execute"]
+session_required_for_change = true  # Must use workspace sessions
+promotion = "approval_required"
+```
+
+### For Autonomous Agents (Internal Automation)
+
+```toml
+[profiles.autonomous]
+role = "autonomous_agent"
+capabilities = [
+  "lookup", "read", "traverse",
+  "change.apply", "change.structural",
+  "exec.task", "exec.command",
+  "plan.execute", "review.run",
+  "session.begin", "session.commit"
+]
+session_required_for_change = true
+promotion = "allowed"
+
+# Pair with stricter policy
+[policy]
+mode = "strict"
+allow_files = ["src/**", "lib/**"]  # Explicit allowlist
+```
+
+## MCP Adapter Consistency
+
+From TOOLS_AND_PROFILES.md:10:
+
+> "Those adapters all sit on the same validation and routing layer. The CLI is not a bypass. MCP is not a privileged lane."
+
+All interfaces (CLI, REPL, MCP, Node/Python bindings) route through the same capability checks:
+
+```
+┌─────────┐  ┌──────┐  ┌─────┐  ┌──────────┐
+│   CLI   │  │ REPL │  │ MCP │  │ Bindings │
+└────┬────┘  └───┬──┘  └──┬──┘  └────┬─────┘
+     │           │        │          │
+     └───────────┴────────┴──────────┘
+                 │
+          ┌──────▼──────┐
+          │  Router &   │
+          │ Validation  │
+          └──────┬──────┘
+                 │
+    ┌────────────┼────────────┐
+    │            │            │
+┌───▼───┐  ┌────▼────┐  ┌────▼─────┐
+│Ceiling│  │ Profile │  │  Policy  │
+│ Check │  │  Check  │  │  Engine  │
+└───┬───┘  └────┬────┘  └────┬─────┘
+    └───────────┴─────────────┘
+                 │
+          ┌──────▼──────┐
+          │   Execute   │
+          └─────────────┘
+```
+
+## Related Concepts
+
+<CardGroup cols={2}>
+  <Card title="Shadow Workspace" icon="layer-group" href="/core-concepts/shadow-workspace">
+    Transaction model for safe mutations
+  </Card>
+  <Card title="Scripts & Plans" icon="file-code" href="/core-concepts/scripts-and-plans">
+    Compiled execution with safeguards
+  </Card>
+</CardGroup>

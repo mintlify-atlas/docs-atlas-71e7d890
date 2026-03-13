@@ -1,0 +1,151 @@
+---
+title: Introduction
+description: A code-intelligence control plane for humans and agents
+---
+
+CURD is a code-intelligence control plane for humans and agents that helps you understand codebases structurally, mutate code safely, and author repeatable workflows.
+
+## What is CURD?
+
+CURD helps you:
+
+- **Understand** a codebase structurally, not just textually
+- **Mutate** code safely inside a shadow workspace
+- **Inspect** graph impact before committing changes
+- **Author** repeatable workflows in `.curd` source scripts
+- **Compile** those workflows into governed plan artifacts
+
+You can use CURD as:
+
+- A serious solo coding tool
+- A supervised agent backend
+- An internal execution substrate for larger agentic systems
+
+## Why CURD Exists
+
+Most coding workflows still make you choose between:
+
+- Fast but sloppy local automation
+- Heavy but awkward governed automation
+
+CURD tries to keep both layers:
+
+- The source layer stays readable
+- The execution layer stays explicit
+
+## Four Core Layers
+
+CURD has four important layers:
+
+<CardGroup cols={2}>
+  <Card title="Code Intelligence" icon="magnifying-glass">
+    - `search` - BM25/FTS-backed ranked search
+    - `graph` - Dependency and call graph traversal
+    - `read` - Symbol-aware code reading
+  </Card>
+  
+  <Card title="Safe Mutation" icon="shield">
+    - `edit` - Symbol-level code editing
+    - Workspace sessions
+    - Shadow diffs and conflict detection
+  </Card>
+  
+  <Card title="Authoring" icon="file-code">
+    - `.curd` scripts for workflow authoring
+    - Structured explainability comments
+    - Parameterized workflows
+  </Card>
+  
+  <Card title="Governed Execution" icon="gavel">
+    - Compiled plan artifacts
+    - Profiles and capability atoms
+    - Policy-based access control
+  </Card>
+</CardGroup>
+
+<Note>
+  If you only want local coding help, you can stay mostly in layers 1 and 2. If you want agentic workflows, layers 3 and 4 become important.
+</Note>
+
+## Key Features
+
+### BM25/FTS-Backed Search
+
+Search is not an afterthought in CURD. Version 0.7.1 adds ranked retrieval to improve top-down entry into a graph-shaped codebase.
+
+### Shadow Workspace Sessions
+
+All mutations happen in a shadow workspace first. You can:
+
+- Apply edits without touching your live codebase
+- Review diffs before committing
+- Rollback changes if needed
+- Run semantic integrity checks
+
+### `.curd` Script Language
+
+Author workflows in a human-friendly scripting language that supports:
+
+- Arguments and variables with `arg` and `let`
+- Multiline strings for code patches
+- `sequence` and `atomic` blocks
+- Structured comments: `# explain:`, `# why:`, `# risk:`, `# review:`, `# tag:`
+
+### Runtime Ceilings and Profiles
+
+CURD has two runtime ceilings (`full` and `lite`) and profile-based capability gating:
+
+- The runtime ceiling defines the outer boundary
+- The active profile defines what the actor can do
+- Policy can still deny a request
+
+This makes CURD usable for both indie/local workflows and enterprise agent harnesses.
+
+## Multi-Language Support
+
+CURD's semantic engine uses Tree-sitter to support:
+
+- Rust
+- Python
+- TypeScript / JavaScript
+- C / C++
+- Java
+- Go
+
+With extensibility through `.curdl` language plugins.
+
+## Product Surfaces
+
+CURD is the backend and control plane. The broader product direction includes:
+
+- **CURD** - The code-intelligence, session, plan, and execution substrate
+- **CURD-CODEX** (future) - An agent-facing coding surface with CURD as the backend
+- **WikiCURD** (future) - A human-first GPUI management surface for developers and PMs
+
+<Note>
+  CURD owns correctness, routing, sessions, and code intelligence. Agent surfaces use CURD instead of bypassing it.
+</Note>
+
+## What's New in 0.7.1
+
+Version 0.7.1 is the release where CURD starts to feel like a real platform:
+
+- BM25/FTS-backed ranked search with safer indexing behavior
+- Stronger separation between `curd-core` and `curd`
+- Shared validation across CLI, REPL, and MCP
+- Profile-gated runtime behavior on top of `lite` / `full` ceilings
+- Real `.curd` authoring flow: `run check`, `run compile`, `plan edit`, `run`
+- Plugin hardening for `.curdl` and `.curdt`
+- Broader package-manager and launcher support
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Installation" icon="download" href="/installation">
+    Install CURD on macOS, Linux, or Windows
+  </Card>
+  
+  <Card title="Quick Start" icon="rocket" href="/quickstart">
+    Get up and running in minutes
+  </Card>
+</CardGroup>

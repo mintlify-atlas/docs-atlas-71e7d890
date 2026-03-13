@@ -1,0 +1,402 @@
+---
+title: 'Language Syntax'
+description: 'Complete reference for .curd script syntax'
+---
+
+## Lexical Structure
+
+### Comments
+
+Comments begin with `#` and continue to the end of the line:
+
+```curd
+# This is a regular comment
+read uri="src/lib.rs::alpha"
+```
+
+<Note>
+  Structured comments starting with `explain:`, `why:`, `risk:`, `review:`, and `tag:` are preserved as metadata. See [Best Practices](/scripting/best-practices) for details.
+</Note>
+
+### Whitespace
+
+- Spaces, tabs, and carriage returns are ignored
+- Newlines are significant as statement separators
+- Indentation is cosmetic (not semantic like Python)
+
+## Use Directives
+
+Directives configure script metadata and must appear before statements.
+
+### use profile
+
+Specify which profile to use for execution:
+
+```curd
+use profile supervised
+```
+
+Profiles control:
+- Tool availability
+- Output limits
+- Retry policies
+- Filesystem boundaries
+
+### use session
+
+Declare session requirements:
+
+```curd
+use session required
+```
+
+Values:
+- `required` - Script requires an active workspace session
+- `optional` - Session is recommended but not enforced
+
+<Warning>
+  Mutating operations (edit, manage_file, shell) always require a session regardless of this directive.
+</Warning>
+
+## Argument Declarations
+
+Arguments let one source script emit multiple concrete plan artifacts.
+
+### Basic Syntax
+
+```curd
+arg name: type
+```
+
+### With Default Value
+
+```curd
+arg name: type = default_value
+```
+
+### Examples
+
+```curd
+# Required argument
+arg target_uri: string
+
+# Optional with default
+arg strict: bool = true
+arg max_depth: number = 2
+arg files: array = ["src/main.rs", "src/lib.rs"]
+```
+
+### Supported Types
+
+- `string` - Text values
+- `bool` - `true` or `false`
+- `number` - Integers or floats
+- `array` - Lists of values
+- `object` - Key-value maps
+
+<Tip>
+  Arguments are resolved at compile time. Use `--target-uri <value>` when running `curd run compile`.
+</Tip>
+
+## Variable Declarations
+
+Variables bind values for use in tool calls.
+
+### Syntax
+
+```curd
+let name = value
+```
+
+### Examples
+
+```curd
+# String variable
+let target = "src/auth.rs::validate"
+
+# Multiline string
+let patch = """
+pub fn validate(token: &str) -> bool {
+    !token.is_empty()
+}
+"""
+
+# Boolean
+let strict = true
+
+# Number
+let depth = 3
+
+# Array
+let files = ["src/main.rs", "src/lib.rs"]
+
+# Object
+let config = {
+  strict: true,
+  depth: 2
+}
+```
+
+## String Literals
+
+### Single-Line Strings
+
+Enclosed in double quotes:
+
+```curd
+let message = "Hello, world!"
+```
+
+Supported escape sequences:
+- `\n` - Newline
+- `\r` - Carriage return
+- `\t` - Tab
+- `\"` - Double quote
+- `\\` - Backslash
+
+### Multiline Strings
+
+Enclosed in triple double quotes:
+
+```curd
+let code = """
+pub fn alpha() {
+    println!("updated");
+}
+"""
+```
+
+<Note>
+  Multiline strings preserve whitespace and newlines exactly as written.
+</Note>
+
+## Value Types
+
+### Boolean
+
+```curd
+let enabled = true
+let disabled = false
+```
+
+### Null
+
+```curd
+let empty = null
+```
+
+### Numbers
+
+```curd
+let count = 42
+let ratio = 3.14
+let negative = -10
+```
+
+### Arrays
+
+```curd
+let items = [1, 2, 3]
+let mixed = ["a", 1, true]
+let nested = [[1, 2], [3, 4]]
+```
+
+### Objects
+
+```curd
+let person = {
+  name: "Alice",
+  age: 30,
+  active: true
+}
+```
+
+## Tool Call Syntax
+
+### Named Arguments
+
+```curd
+tool_name arg1=value1 arg2=value2
+```
+
+### Example
+
+```curd
+edit uri="src/lib.rs::alpha" action="upsert" code=$patch
+```
+
+<Warning>
+  Mixing named and positional arguments is not allowed.
+</Warning>
+
+### Positional Arguments (Limited)
+
+Only supported for specific tools with a single argument:
+
+```curd
+search "query text"
+read "src/lib.rs::alpha"
+shell "cargo build"
+```
+
+These are syntactic sugar for:
+
+```curd
+search query="query text"
+read uris=["src/lib.rs::alpha"]
+shell command="cargo build"
+```
+
+## Variable Interpolation
+
+Reference variables with `$` prefix:
+
+```curd
+let target = "src/lib.rs::alpha"
+read $target
+```
+
+Expands to:
+
+```curd
+read "src/lib.rs::alpha"
+```
+
+### In Arguments
+
+```curd
+arg target_uri: string
+let patch = "pub fn alpha() {}"
+
+edit uri=$target_uri code=$patch action="upsert"
+```
+
+## Identifiers
+
+Identifiers (variable names, tool names) must:
+- Start with ASCII letter or underscore
+- Continue with ASCII letters, digits, underscores, dots, or hyphens
+- Not be a keyword
+
+### Valid Identifiers
+
+```curd
+let my_var = 1
+let config.setting = true
+let some-value = "test"
+```
+
+## Keywords
+
+Reserved words:
+- `use`
+- `profile`
+- `session`
+- `arg`
+- `let`
+- `sequence`
+- `atomic`
+- `parallel` (parsed but not executable)
+- `abort`
+- `true`, `false`, `null`
+
+## Statement Separators
+
+Statements are separated by newlines. You can write:
+
+```curd
+let a = 1
+let b = 2
+read $a
+```
+
+But not:
+
+```curd
+let a = 1 let b = 2  # Error: newline required
+```
+
+## Blocks
+
+Blocks group multiple statements:
+
+```curd
+sequence block_name {
+  statement1
+  statement2
+}
+```
+
+Block names are optional:
+
+```curd
+atomic {
+  edit uri="src/lib.rs" code=$patch
+  verify_impact strict=true
+}
+```
+
+## Complete Example
+
+```curd
+# explain: safely update authentication logic
+# why: fix security vulnerability in token validation
+# risk: auth module is critical path
+
+use profile supervised
+use session required
+
+arg target_uri: string
+arg strict: bool = true
+
+let patch = """
+pub fn validate(token: &str) -> bool {
+    if token.is_empty() {
+        return false;
+    }
+    // Additional validation logic
+    verify_token_format(token)
+}
+"""
+
+sequence main {
+  # Read current implementation
+  read $target_uri
+  
+  # Check dependencies
+  graph uri=$target_uri direction="both" depth=2
+  
+  atomic apply_changes {
+    edit uri=$target_uri action="upsert" code=$patch
+    verify_impact strict=$strict
+  }
+}
+```
+
+## Error Handling
+
+The parser reports errors with context:
+
+```curd
+let bad = "unterminated string
+```
+
+Error:
+```
+Error: unterminated string literal in .curd script
+```
+
+<Tip>
+  Use `curd run check` to validate syntax and semantics before execution.
+</Tip>
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Variables" icon="brackets-curly" href="/scripting/variables">
+    Learn about arguments and variable interpolation
+  </Card>
+  <Card title="Control Flow" icon="diagram-project" href="/scripting/control-flow">
+    Use sequence, atomic, and abort constructs
+  </Card>
+</CardGroup>

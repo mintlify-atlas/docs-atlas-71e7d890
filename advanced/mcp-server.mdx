@@ -1,0 +1,451 @@
+---
+title: 'MCP Server'
+description: 'Starting and integrating the Model Context Protocol server'
+---
+
+CURD implements a Model Context Protocol (MCP) server for agent integration. The server exposes tools, manages connections, and enforces capability boundaries.
+
+## Starting the MCP Server
+
+### Basic Invocation
+
+```bash
+curd --root /path/to/workspace --mcp
+```
+
+The server:
+- Validates workspace configuration on startup
+- Listens on stdin for JSON-RPC 2.0 requests
+- Writes responses to stdout
+- Routes through the same control plane as CLI/REPL
+
+### Runtime Mode
+
+The `CURD_MODE` environment variable controls the runtime ceiling:
+
+```bash
+# Full mode (default): all tools available
+CURD_MODE=full curd --root . --mcp
+
+# Lite mode: restricted toolset
+CURD_MODE=lite curd --root . --mcp
+```
+
+<Note>
+  Lite mode limits tools to: `search`, `read`, `edit`, `graph`, `workspace`. All other tools return `-32601` (method disabled).
+</Note>
+
+---
+
+## API Version
+
+CURD implements MCP protocol version `2024-11-05` with API version `0.7.1`:
+
+```rust
+// From curd/src/mcp.rs:15
+pub const API_VERSION: &str = "0.7.1";
+```
+
+---
+
+## Connection Flow
+
+<Steps>
+  <Step title="Initialize">
+    Client sends `initialize` request. Server responds with capabilities and version info.
+  </Step>
+  
+  <Step title="List Tools">
+    Client calls `tools/list` to discover available operations.
+  </Step>
+  
+  <Step title="Open Connection (Optional)">
+    For stateful operations, client calls `connection_open` with Ed25519 public key.
+  </Step>
+  
+  <Step title="Verify Connection">
+    Client signs the nonce and calls `connection_verify` to receive a connection token.
+  </Step>
+  
+  <Step title="Execute Tools">
+    Client invokes `tools/call` with connection token for gated operations.
+  </Step>
+</Steps>
+
+### Initialize Request
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "method": "initialize",
+  "params": {}
+}
+```
+
+**Response:**
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "result": {
+    "apiVersion": "0.7.1",
+    "protocolVersion": "2024-11-05",
+    "capabilities": { "tools": {} },
+    "serverInfo": { "name": "curd", "version": "0.1.0" }
+  }
+}
+```
+
+---
+
+## Tool Discovery
+
+### Static Tools
+
+Built-in tools are always available and listed in `tools/list`:
+
+```rust
+// From curd/src/mcp.rs:549-631 (excerpt)
+fn get_all_tools() -> Vec<Value> {
+    vec![
+        json!({
+            "name": "search",
+            "description": "Instant, SQLite-backed Semantic Graph search...",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string"},
+                    "mode": {"type": "string", "enum": ["symbol", "text", "tiered"]},
+                    "kind": {"type": "string", "enum": ["function", "class", "method"]}
+                },
+                "required": ["query", "mode"]
+            }
+        }),
+        json!({
+            "name": "edit",
+            "description": "Create, replace, or delete a function or module section...",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "uri": {"type": "string"},
+                    "code": {"type": "string"},
+                    "action": {"type": "string", "enum": ["upsert", "delete"]},
+                    "adaptation_justification": {"type": "string"}
+                },
+                "required": ["uri", "code", "adaptation_justification"]
+            }
+        })
+        // ... 40+ more tools
+    ]
+}
+```
+
+### Dynamic Tools
+
+Plugins and external tool groups are discovered at runtime:
+
+```rust
+// From curd/src/mcp.rs:420-484
+fn dynamic_tool_entries(ctx: &EngineContext) -> Vec<Value> {
+    let mut out = Vec::new();
+    
+    // Installed .curdt tool plugins
+    if let Ok(plugins) = ctx.tpe.list() {
+        for record in plugins {
+            let Some(tool) = record.tool else { continue };
+            out.push(json!({
+                "name": tool.tool_name,
+                "description": tool.description.unwrap_or_else(|| "Installed signed tool plugin".to_string()),
+                "inputSchema": { /* derived from tool.parameters */ },
+                "x-curd": {
+                    "source": "tool_plugin",
+                    "package_id": record.package_id,
+                    "agent_usage": tool.agent_usage,
+                    "review_guidance": tool.review_guidance
+                }
+            }));
+        }
+    }
+    
+    // Adopted MCP tool groups
+    if let Ok(groups) = ctx.tge.list() {
+        for group in groups {
+            for tool in group.tools {
+                out.push(json!({
+                    "name": tool.name,
+                    "description": tool.description,
+                    "inputSchema": tool.input_schema,
+                    "x-curd": {
+                        "source": "tool_group",
+                        "group_id": group.group_id
+                    }
+                }));
+            }
+        }
+    }
+    out
+}
+```
+
+### Tool Metadata
+
+Every tool includes `x-curd` annotations:
+
+```json
+{
+  "name": "edit",
+  "x-curd": {
+    "capability": "change.prepare",
+    "operation": "edit",
+    "lite_available": true,
+    "session_required": true,
+    "approval_requirement": "profile_or_policy"
+  }
+}
+```
+
+---
+
+## Connection Tokens
+
+### Opening a Connection
+
+<CodeGroup>
+```json Request
+{
+  "jsonrpc": "2.0",
+  "id": 2,
+  "method": "tools/call",
+  "params": {
+    "name": "connection_open",
+    "arguments": {
+      "pubkey_hex": "a1b2c3d4e5f6789abcdef0123456789abcdef0123456789abcdef0123456789a"
+    }
+  }
+}
+```
+
+```json Response
+{
+  "jsonrpc": "2.0",
+  "id": 2,
+  "result": {
+    "content": [{
+      "type": "text",
+      "text": "{\"nonce\":\"f7e8d9c0b1a2...\",\"expires_at_secs\":1709860000}"
+    }]
+  }
+}
+```
+</CodeGroup>
+
+### Verifying the Connection
+
+Client signs the nonce with Ed25519 private key:
+
+<CodeGroup>
+```json Request
+{
+  "jsonrpc": "2.0",
+  "id": 3,
+  "method": "tools/call",
+  "params": {
+    "name": "connection_verify",
+    "arguments": {
+      "pubkey_hex": "a1b2c3d4...",
+      "signature_hex": "9f8e7d6c5b4a..."
+    }
+  }
+}
+```
+
+```json Response
+{
+  "jsonrpc": "2.0",
+  "id": 3,
+  "result": {
+    "content": [{
+      "type": "text",
+      "text": "{\"connection_token\":\"conn_a1b2c3d4e5f6\",\"is_human_actor\":false}"
+    }]
+  }
+}
+```
+</CodeGroup>
+
+### Using Connection Tokens
+
+Pass the token in subsequent tool calls:
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 4,
+  "method": "tools/call",
+  "params": {
+    "name": "edit",
+    "arguments": {
+      "connection_token": "conn_a1b2c3d4e5f6",
+      "uri": "src/main.rs::main",
+      "code": "fn main() { println!(\"Updated\"); }",
+      "adaptation_justification": "Fix typo in output message"
+    }
+  }
+}
+```
+
+<Warning>
+  Connection tokens expire after inactivity. The freeze hook persists session state to `.curd/sessions/` on server shutdown.
+</Warning>
+
+---
+
+## Progress Notifications
+
+CURD emits `notifications/progress` events for long-running operations:
+
+```json
+{
+  "jsonrpc": "2.0",
+  "method": "notifications/progress",
+  "params": {
+    "event_id": "evt_123",
+    "collaboration_id": "collab_456",
+    "phase": "indexing",
+    "processed_files": 450,
+    "total_files": 1000,
+    "percent": 45.0,
+    "duration_ms": 8500,
+    "summary": "Indexing: 450/1000 files"
+  }
+}
+```
+
+**Event Types:**
+
+- `phase: "indexing"` – File indexing progress
+- `phase: "stall_detected"` – Indexing stall warning (includes `no_progress_ms`)
+- `phase: "indexing_stats"` – Final stats after index completion
+
+```rust
+// From curd/src/mcp.rs:310-390 (excerpt)
+fn system_event_to_notification(envelope: SystemEventEnvelope) -> Option<Value> {
+    match envelope.event.clone() {
+        SystemEvent::NodeCompleted { summary, duration_ms, .. } => {
+            if let Some((processed_files, total_files)) = parse_indexing_summary(&summary) {
+                let percent = ((processed_files as f64 / total_files as f64) * 100.0).clamp(0.0, 100.0);
+                return Some(json!({
+                    "jsonrpc": "2.0",
+                    "method": "notifications/progress",
+                    "params": {
+                        "phase": "indexing",
+                        "processed_files": processed_files,
+                        "total_files": total_files,
+                        "percent": percent,
+                        "duration_ms": duration_ms
+                    }
+                }));
+            }
+            // ...
+        }
+        _ => Some(json!({ "method": "notifications/system_event", "params": envelope }))
+    }
+}
+```
+
+---
+
+## Error Handling
+
+MCP server returns JSON-RPC 2.0 error responses:
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 5,
+  "error": {
+    "code": -32601,
+    "message": "Tool disabled in current mode: shell",
+    "details": null
+  }
+}
+```
+
+**Error Codes:**
+
+- `-32601`: Method not found / disabled
+- `-32000`: Internal error / validation failure
+- `-32602`: Invalid params
+
+---
+
+## Integration Best Practices
+
+<Steps>
+  <Step title="Query Capabilities First">
+    Call `tools/list` and inspect `x-curd.session_required` and `x-curd.approval_requirement` before execution.
+  </Step>
+  
+  <Step title="Open Session Before Mutations">
+    For tools with `session_required: true`, call `workspace(action: "begin")` before `edit`, `manage_file`, or `shell`.
+  </Step>
+  
+  <Step title="Use Connection Tokens">
+    Pass `connection_token` in all tool calls after `connection_verify` to maintain state.
+  </Step>
+  
+  <Step title="Handle Progress Events">
+    Subscribe to `notifications/progress` for long-running operations like indexing.
+  </Step>
+  
+  <Step title="Commit or Rollback">
+    After mutations, call `workspace(action: "commit")` or `workspace(action: "rollback")` to finalize changes.
+  </Step>
+</Steps>
+
+<Note>
+  The MCP server routes all tool calls through the same validation layer as CLI/REPL. Profiles, runtime ceilings, and policy checks are consistently enforced.
+</Note>
+
+---
+
+## Mode Enforcement
+
+```rust
+// From curd/src/mcp.rs:18-50
+pub enum McpServerMode {
+    Lite,
+    Full,
+}
+
+impl McpServerMode {
+    pub fn from_env() -> Self {
+        match std::env::var("CURD_MODE")
+            .unwrap_or_else(|_| "full".to_string())
+            .to_lowercase()
+            .as_str()
+        {
+            "lite" => McpServerMode::Lite,
+            _ => McpServerMode::Full,
+        }
+    }
+
+    pub fn allows_method(self, method: &str) -> bool {
+        match self {
+            McpServerMode::Full => true,
+            McpServerMode::Lite => matches!(method, "initialize" | "tools/list" | "tools/call"),
+        }
+    }
+
+    pub fn allows_tool(self, tool: &str) -> bool {
+        match self {
+            McpServerMode::Full => true,
+            McpServerMode::Lite => {
+                matches!(tool, "search" | "read" | "edit" | "graph" | "workspace")
+            }
+        }
+    }
+}
+```

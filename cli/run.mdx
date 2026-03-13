@@ -1,0 +1,576 @@
+---
+title: curd run
+description: Execute .curd scripts with check, compile, and execute modes
+---
+
+## Overview
+
+The `curd run` command executes `.curd` source scripts, supporting preflight checking, compilation to plan artifacts, and governed execution.
+
+```bash
+curd run [mode] <script> [options]
+```
+
+## Modes
+
+### Execute (Default)
+
+Run script directly:
+
+```bash
+curd run fix_auth.curd
+```
+
+Requires session for mutating scripts:
+```bash
+curd workspace begin
+curd run fix_auth.curd
+curd workspace commit
+```
+
+### Check
+
+Preflight validation without execution:
+
+```bash
+curd run check fix_auth.curd
+```
+
+Returns:
+- Resolved targets
+- Graph-adjacent impact
+- Conflict risk assessment
+- Session requirement
+- Suggested safeguards
+
+### Compile
+
+Compile script to plan artifact:
+
+```bash
+curd run compile fix_auth.curd
+```
+
+Creates:
+- `.curd/plans/<uuid>.json` - Compiled plan
+- Bound arguments
+- Explainability metadata
+- Safeguards
+
+## Arguments
+
+<ParamField path="mode" type="string">
+  Execution mode:
+  - `check` - Validate without executing
+  - `compile` - Compile to plan artifact
+  - (omit) - Execute directly
+</ParamField>
+
+<ParamField path="script" type="string" required>
+  Path to `.curd` script file
+  
+  When using mode: second argument
+  When omitting mode: first argument
+</ParamField>
+
+## Options
+
+<ParamField path="--root" type="string" default=".">
+  Path to workspace root
+</ParamField>
+
+<ParamField path="--arg" type="string" repeatable>
+  Script argument override in `key=value` format.
+  
+  Can be specified multiple times:
+  ```bash
+  curd run script.curd --arg target="src/lib.rs::func" --arg strict=true
+  ```
+  
+  Values are parsed as JSON when possible:
+  - `--arg count=42` → `{"count": 42}`
+  - `--arg flag=true` → `{"flag": true}`
+  - `--arg name="test"` → `{"name": "test"}`
+</ParamField>
+
+<ParamField path="--profile" type="string">
+  Profile override for this execution.
+  
+  Overrides profile declared in script or settings.toml:
+  ```bash
+  curd run script.curd --profile supervised
+  ```
+</ParamField>
+
+<ParamField path="--out" type="PathBuf">
+  Output path for compiled plan (compile mode only).
+  
+  ```bash
+  curd run compile script.curd --out plans/my-plan.json
+  ```
+  
+  Default: `.curd/plans/<uuid>.json`
+</ParamField>
+
+## Script Syntax
+
+### Basic Structure
+
+```curd
+# explain: what this script does
+# why: rationale for changes
+# risk: potential issues
+
+use session required
+use profile supervised
+
+arg target_uri: string
+arg strict: bool = true
+
+let patch = """
+pub fn updated_func() {
+    // implementation
+}
+"""
+
+atomic {
+  edit uri=$target_uri action="upsert" code=$patch
+  verify_impact strict=$strict
+}
+```
+
+### Directives
+
+**Session requirement**:
+```curd
+use session required  # Enforce session before execution
+use session optional  # Session not required
+```
+
+**Profile selection**:
+```curd
+use profile supervised
+use profile autonomous
+```
+
+### Arguments
+
+```curd
+arg target: string               # Required argument
+arg count: number = 10           # Optional with default
+arg enabled: bool = true
+arg items: array
+```
+
+Override at runtime:
+```bash
+curd run script.curd --arg target="src/lib.rs::func" --arg count=20
+```
+
+### Variables
+
+```curd
+let code_snippet = """
+pub fn example() {
+    println!("multi-line code");
+}
+"""
+
+let uri = "src/lib.rs::example"
+
+edit uri=$uri code=$code_snippet
+```
+
+### Control Flow
+
+**Sequence** (execute in order):
+```curd
+sequence {
+  search query="auth" kind="function"
+  read uri="src/auth.rs::validate"
+  edit uri="src/auth.rs::validate" code=$patch
+}
+```
+
+**Atomic** (all-or-nothing):
+```curd
+atomic {
+  edit uri="src/a.rs::func_a" code=$patch_a
+  edit uri="src/b.rs::func_b" code=$patch_b
+  # If any fails, all rollback
+}
+```
+
+**Abort**:
+```curd
+abort "Reason for stopping execution"
+```
+
+<Note>
+**Parallel** blocks are parsed but rejected at compile/execute time until runtime supports honest parallel lowering.
+</Note>
+
+### Explainability Comments
+
+Structured comments preserved in compiled artifacts:
+
+```curd
+# explain: Refactor authentication to use JWT tokens
+# why: Current session management is stateful and doesn't scale
+# risk: Breaking change for existing API clients
+# review: Requires security team approval
+# tag: security, breaking-change
+```
+
+View in compiled plan:
+```bash
+curd plan read <plan-id>
+```
+
+## Workflow
+
+### 1. Author Script
+
+Create `.curd` file:
+
+```curd
+# explain: Add request timeout to all handlers
+use session required
+
+arg timeout_ms: number = 5000
+
+let timeout_code = """
+pub const REQUEST_TIMEOUT: Duration = Duration::from_millis($timeout_ms);
+"""
+
+atomic {
+  edit uri="src/config.rs::REQUEST_TIMEOUT" code=$timeout_code
+  verify_impact
+}
+```
+
+### 2. Check (Preflight)
+
+```bash
+curd run check add_timeout.curd --arg timeout_ms=3000
+```
+
+Output:
+```json
+{
+  "validation": "passed",
+  "resolved_targets": ["src/config.rs::REQUEST_TIMEOUT"],
+  "impact": {
+    "affected_files": ["src/config.rs"],
+    "dependent_symbols": 15,
+    "risk_level": "medium"
+  },
+  "session_required": true,
+  "safeguards": [
+    "Verify dependent handlers still compile",
+    "Test timeout behavior"
+  ]
+}
+```
+
+### 3. Compile
+
+```bash
+curd run compile add_timeout.curd --arg timeout_ms=3000
+```
+
+Creates: `.curd/plans/<uuid>.json`
+
+Artifact contains:
+- Compiled DSL/plan
+- Source hash
+- Bound arguments (`timeout_ms=3000`)
+- Explainability metadata
+- Safeguards
+
+### 4. Edit Plan (Optional)
+
+```bash
+curd plan edit <uuid>
+```
+
+Adjust:
+- Profile
+- Output limits
+- Retry limits
+- Node-specific settings
+
+See [plan command](/cli/plan) for details.
+
+### 5. Execute
+
+```bash
+curd workspace begin
+curd run add_timeout.curd --arg timeout_ms=3000
+curd workspace commit
+```
+
+Or execute compiled plan:
+```bash
+curd workspace begin
+curd plan impl <uuid> --session <session-id>
+curd workspace commit
+```
+
+## Examples
+
+### Simple Refactor
+
+```curd
+# explain: Rename deprecated function
+use session required
+
+arg old_name: string = "validate_old"
+arg new_name: string = "validate"
+
+refactor rename symbol=$old_name new_name=$new_name
+```
+
+Run:
+```bash
+curd workspace begin
+curd run refactor.curd
+curd workspace commit
+```
+
+### Multi-Step Update
+
+```curd
+# explain: Update authentication flow
+use session required
+use profile supervised
+
+let login_code = """
+pub fn login(credentials: Credentials) -> Result<Session> {
+    let user = authenticate(credentials)?;
+    create_session(user)
+}
+"""
+
+let logout_code = """
+pub fn logout(session_id: &str) -> Result<()> {
+    revoke_session(session_id)
+}
+"""
+
+atomic {
+  edit uri="src/auth.rs::login" code=$login_code
+  edit uri="src/auth.rs::logout" code=$logout_code
+  verify_impact strict=true
+}
+```
+
+### Conditional Execution
+
+```curd
+# explain: Clean up dead code
+use session required
+
+arg dry_run: bool = true
+
+let targets = [
+  "src/legacy.rs::old_api",
+  "src/legacy.rs::deprecated_handler"
+]
+
+sequence {
+  # Check what depends on targets
+  graph uris=$targets depth=2
+  
+  # If dry_run, abort here
+  abort_if condition=$dry_run message="Dry run complete"
+  
+  # Otherwise, delete
+  edit uri="src/legacy.rs::old_api" action="delete"
+  edit uri="src/legacy.rs::deprecated_handler" action="delete"
+}
+```
+
+Check:
+```bash
+curd run check cleanup.curd --arg dry_run=true
+```
+
+Execute:
+```bash
+curd workspace begin
+curd run cleanup.curd --arg dry_run=false
+curd workspace commit
+```
+
+## Argument Binding
+
+Arguments can be:
+
+### Required
+```curd
+arg target: string  # Must provide --arg target="..."
+```
+
+### Optional with Default
+```curd
+arg count: number = 10  # Uses 10 if not provided
+```
+
+### Types
+
+- `string` - Text values
+- `number` - Integers or floats
+- `bool` - true/false
+- `array` - JSON arrays
+- `object` - JSON objects
+
+Runtime parsing:
+```bash
+# String
+--arg name="value"
+
+# Number
+--arg count=42
+
+# Bool
+--arg enabled=true
+
+# Array (JSON)
+--arg items='[1,2,3]'
+
+# Object (JSON)
+--arg config='{"key":"value"}'
+```
+
+## Output
+
+### Check Mode
+
+Returns validation report:
+```json
+{
+  "validation": "passed",
+  "resolved_targets": [...],
+  "impact": {...},
+  "session_required": true,
+  "safeguards": [...]
+}
+```
+
+### Compile Mode
+
+Returns plan info:
+```json
+{
+  "plan_id": "550e8400-e29b-41d4-a716-446655440000",
+  "path": ".curd/plans/550e8400-e29b-41d4-a716-446655440000.json",
+  "nodes": 5,
+  "source_hash": "abc123..."
+}
+```
+
+### Execute Mode
+
+Returns execution results:
+```json
+{
+  "status": "success",
+  "nodes_executed": 5,
+  "session_id": "...",
+  "changes": [
+    {
+      "file": "src/auth.rs",
+      "symbol": "validate",
+      "action": "modified"
+    }
+  ]
+}
+```
+
+## Error Handling
+
+### Session Required
+
+```bash
+$ curd run mutating_script.curd
+Error: SESSION_REQUIRED: Script contains mutating steps
+
+Run with session:
+  curd workspace begin
+  curd run mutating_script.curd
+  curd workspace commit
+```
+
+### Missing Argument
+
+```bash
+$ curd run script.curd
+Error: Missing required argument: target_uri
+
+Provide with:
+  curd run script.curd --arg target_uri="src/lib.rs::func"
+```
+
+### Syntax Error
+
+```bash
+$ curd run check broken.curd
+Error: Parse error at line 15: unexpected token
+
+  15| atmoic {  # Typo: should be 'atomic'
+```
+
+### Validation Failed
+
+```bash
+$ curd run check script.curd
+{
+  "validation": "failed",
+  "errors": [
+    "Target not found: src/missing.rs::func",
+    "Circular dependency detected"
+  ]
+}
+```
+
+## Profile Enforcement
+
+Scripts can declare required profile:
+
+```curd
+use profile supervised
+```
+
+If current profile lacks capabilities:
+```bash
+$ curd run script.curd
+Error: PROFILE_DENIED: 'assist' profile cannot execute 'change.apply'
+
+Script requires: supervised
+Current profile: assist
+```
+
+Override:
+```bash
+curd run script.curd --profile supervised
+```
+
+See [profiles](/cli/profiles) for configuration.
+
+## Related Commands
+
+<CardGroup cols={2}>
+  <Card title="plan" icon="list-check" href="/cli/plan">
+    Manage compiled plan artifacts
+  </Card>
+  <Card title="workspace" icon="code-branch" href="/cli/workspace">
+    Session management for execution
+  </Card>
+  <Card title="edit" icon="pen" href="/cli/edit">
+    Direct symbol editing
+  </Card>
+  <Card title="profiles" icon="user-shield" href="/cli/profiles">
+    Configure execution profiles
+  </Card>
+</CardGroup>

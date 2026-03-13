@@ -1,0 +1,174 @@
+---
+title: CLI Overview
+description: CURD command-line interface structure, patterns, and help system
+---
+
+## Command Structure
+
+CURD provides a comprehensive CLI for code intelligence, semantic operations, and workspace management. All commands follow a consistent structure:
+
+```bash
+curd <command> [subcommand] [options] [arguments]
+```
+
+## Common Patterns
+
+### Workspace Root
+
+Most commands accept a `--root` flag to specify the workspace directory:
+
+```bash
+curd search "query" --root /path/to/workspace
+```
+
+By default, CURD resolves the workspace root in this order:
+1. `CURD_WORKSPACE_ROOT` environment variable
+2. Explicit `--root` argument (if not `.`)
+3. Git repository top-level (`git rev-parse --show-toplevel`)
+4. Current working directory
+
+### Aliases
+
+Many commands have short aliases for faster interaction:
+
+- `curd s` → `curd search`
+- `curd e` → `curd edit`
+- `curd g` → `curd graph`
+- `curd b` → `curd build`
+- `curd p` → `curd plan`
+- `curd ini` → `curd init`
+- `curd st` → `curd status`
+
+### Output Formats
+
+Commands that support structured output typically provide:
+
+- **Human-readable**: Default colorized terminal output
+- **JSON**: Use `--json` flag for machine-readable output (where available)
+
+```bash
+curd build --json
+```
+
+## Help System
+
+### Getting Help
+
+Access help information at multiple levels:
+
+```bash
+# General help
+curd --help
+curd help
+curd h
+
+# Command-specific help
+curd build --help
+curd plan --help
+```
+
+### Man Pages
+
+Generate man page documentation:
+
+```bash
+curd man > curd.1
+man ./curd.1
+```
+
+### Shell Completions
+
+Generate completion scripts for your shell:
+
+```bash
+# Bash
+curd completions bash > ~/.local/share/bash-completion/completions/curd
+
+# Zsh
+curd completions zsh > ~/.zsh/completions/_curd
+
+# Fish
+curd completions fish > ~/.config/fish/completions/curd.fish
+
+# PowerShell
+curd completions powershell > curd.ps1
+```
+
+## Command Categories
+
+### Core Operations
+
+- [**init**](/cli/init) - Initialize CURD workspace
+- [**search**](/cli/search) - Semantic search across indexed symbols
+- [**read**](/cli/read) - Read files or symbols
+- [**edit**](/cli/edit) - AST-aware code mutations
+- [**graph**](/cli/graph) - Explore dependency graphs
+
+### Workspace Management
+
+- [**workspace**](/cli/workspace) - Manage shadow transactions
+- [**status**](/cli/workspace#status) - View workspace state
+- [**session**](/cli/workspace#sessions) - Manual session control
+
+### Execution & Building
+
+- [**run**](/cli/run) - Execute .curd scripts
+- [**build**](/cli/build) - Adapter-based build system
+- [**plan**](/cli/plan) - Manage compiled plan artifacts
+
+### Analysis & Diagnostics
+
+- [**doctor**](/cli/doctor) - Indexing diagnostics and validation
+- [**test**](/cli/workspace#semantic-tests) - Semantic integrity tests
+- [**diff**](/cli/workspace#diff) - AST-level comparison
+
+### Advanced Features
+
+- [**repl**](/cli/repl) - Interactive CURD shell
+- [**mcp**](/cli/mcp) - Model Context Protocol server
+- [**settings**](/cli/settings) - Configuration management
+- [**profiles**](/cli/profiles) - Profile and capability configuration
+
+## Common Flags
+
+<ParamField path="--root" type="string" default=".">
+  Path to the workspace root directory
+</ParamField>
+
+<ParamField path="--help" type="boolean">
+  Display help information for the command
+</ParamField>
+
+<ParamField path="--version" type="boolean">
+  Display CURD version information
+</ParamField>
+
+## Environment Variables
+
+- `CURD_WORKSPACE_ROOT` - Override workspace root detection
+- `CURD_MODE` - Runtime mode ceiling (`full` or `lite`)
+- `CURD_INDEX_WORKER_BIN` - Path to index worker binary (internal)
+- `PAGER` - Pager program for `curd read` (default: `less -R`)
+
+## Exit Codes
+
+- `0` - Success
+- `1` - General error or command failure
+- Non-zero - Specific error conditions (build failures, validation errors, etc.)
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Initialize Workspace" icon="rocket" href="/cli/init">
+    Set up CURD in your repository
+  </Card>
+  <Card title="Search & Read" icon="magnifying-glass" href="/cli/search">
+    Explore your codebase semantically
+  </Card>
+  <Card title="Workspace Sessions" icon="code-branch" href="/cli/workspace">
+    Safe mutation with shadow transactions
+  </Card>
+  <Card title="Build System" icon="hammer" href="/cli/build">
+    Adapter-based compilation
+  </Card>
+</CardGroup>

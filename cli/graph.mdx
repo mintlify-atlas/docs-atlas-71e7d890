@@ -1,0 +1,414 @@
+---
+title: curd graph
+description: Explore caller/callee dependency graphs with configurable depth and direction
+---
+
+## Overview
+
+The `curd graph` command explores the dependency graph of a symbol, showing caller/callee relationships, imports, and architectural connections. It uses the indexed symbol graph to trace relationships up to a specified depth.
+
+```bash
+curd graph <uri> [options]
+```
+
+## Usage
+
+```bash
+# Basic graph (depth 1, both directions)
+curd graph "src/auth.rs::validate_token"
+
+# Deeper traversal
+curd graph "src/handlers.rs::process" --depth 3
+
+# Specific workspace
+curd graph "lib.rs::main" --root /path/to/project
+
+# Using alias
+curd g "src/server.rs::start" --depth 2
+```
+
+## Arguments
+
+<ParamField path="uri" type="string" required>
+  The symbol URI to explore.
+  
+  Format: `path/to/file.ext::symbol_name`
+  
+  Examples:
+  - `src/auth.rs::validate_token`
+  - `src/models.rs::User::save`
+  - `lib.rs::process_request`
+</ParamField>
+
+## Options
+
+<ParamField path="--depth" type="integer" default="1">
+  Maximum traversal depth from the root symbol.
+  
+  - `1` - Direct callers and callees only
+  - `2` - Two levels of relationships
+  - `3+` - Deep dependency analysis
+  
+  **Warning**: Large graphs can be expensive to compute. Start small.
+</ParamField>
+
+<ParamField path="--root" type="string" default=".">
+  Path to the workspace root
+</ParamField>
+
+## How Graph Works
+
+### 1. Symbol Resolution
+
+CURD resolves the target symbol from the index:
+
+```bash
+curd graph "src/auth.rs::validate_token"
+# Resolves to indexed symbol with metadata
+```
+
+### 2. Edge Extraction
+
+From the symbol graph, CURD extracts:
+
+- **Outgoing edges**: Functions/symbols this symbol calls
+- **Incoming edges**: Functions/symbols that call this symbol
+- **Import edges**: Module imports and dependencies
+- **Type edges**: Type dependencies (structs, traits, interfaces)
+
+### 3. Traversal
+
+Depth-first traversal up to `--depth`:
+
+```
+Depth 1:    validate_token
+              ├─ calls: check_expiry
+              ├─ calls: decode_jwt
+              └─ called by: login_handler
+
+Depth 2:    validate_token
+              ├─ calls: check_expiry
+              │   └─ calls: get_current_time
+              ├─ calls: decode_jwt  
+              │   ├─ calls: parse_header
+              │   └─ calls: verify_signature
+              └─ called by: login_handler
+                  ├─ called by: http_router
+                  └─ called by: api_endpoint
+```
+
+## Output Format
+
+Graph output is structured JSON:
+
+```json
+{
+  "graph": {
+    "root": "src/auth.rs::validate_token",
+    "nodes": [
+      {
+        "uri": "src/auth.rs::validate_token",
+        "kind": "function",
+        "file": "src/auth.rs",
+        "line": 42
+      },
+      {
+        "uri": "src/auth.rs::check_expiry",
+        "kind": "function",
+        "file": "src/auth.rs",
+        "line": 67
+      }
+    ],
+    "edges": [
+      {
+        "from": "src/auth.rs::validate_token",
+        "to": "src/auth.rs::check_expiry",
+        "kind": "calls",
+        "confidence": 0.95
+      },
+      {
+        "from": "src/handlers.rs::login_handler",
+        "to": "src/auth.rs::validate_token",
+        "kind": "calls",
+        "confidence": 0.92
+      }
+    ]
+  },
+  "stats": {
+    "total_nodes": 8,
+    "total_edges": 12,
+    "max_depth_reached": 2
+  }
+}
+```
+
+## Depth Examples
+
+### Depth 1: Immediate Dependencies
+
+```bash
+curd graph "src/server.rs::start" --depth 1
+```
+
+Shows:
+- Direct function calls from `start`
+- Direct callers of `start`
+
+### Depth 2: Second-Order Impact
+
+```bash
+curd graph "src/auth.rs::validate" --depth 2
+```
+
+Shows:
+- What `validate` calls, and what those call
+- What calls `validate`, and what calls those
+
+Useful for impact analysis before edits.
+
+### Depth 3+: Deep Analysis
+
+```bash
+curd graph "src/main.rs::main" --depth 4
+```
+
+Shows:
+- Deep dependency tree
+- Transitive callers and callees
+
+**Warning**: Can produce large graphs. Use for architectural analysis.
+
+## Graph Direction
+
+<Note>
+CLI currently explores **both directions** (callers + callees). API/MCP support directional filters.
+</Note>
+
+Internal direction options (API only):
+
+- `outgoing` - Only callees (what this symbol calls)
+- `incoming` - Only callers (what calls this symbol)  
+- `both` - Bidirectional (default for CLI)
+
+## Use Cases
+
+### Impact Analysis Before Edit
+
+```bash
+# Check what depends on a function before changing it
+curd graph "src/api.rs::deprecated_endpoint" --depth 2
+
+# If many callers found, refactor carefully
+curd workspace begin
+curd edit "src/api.rs::deprecated_endpoint" --code "..."
+curd workspace commit
+```
+
+### Architectural Review
+
+```bash
+# Find cyclical dependencies
+curd graph "src/module_a.rs::func" --depth 3
+# Look for cycles in output
+
+# Or use semantic test
+curd test architecture --verbose
+```
+
+### Refactoring Planning
+
+```bash
+# Understand dependencies before moving code
+curd graph "src/utils.rs::helper" --depth 2
+
+# Refactor with context
+curd refactor move "src/utils.rs::helper" "src/common/helpers.rs"
+```
+
+### Dead Code Detection
+
+```bash
+# Find symbols with no incoming edges
+curd graph "src/old.rs::unused_func" --depth 1
+# If no callers found, consider removing
+
+curd workspace begin
+curd edit "src/old.rs::unused_func" --action delete
+curd workspace commit
+```
+
+## Integration Workflow
+
+### Search → Graph
+
+```bash
+# Find interesting symbol
+curd search "authentication" --kind function
+# Returns: src/auth.rs::authenticate_user
+
+# Explore its graph
+curd graph "src/auth.rs::authenticate_user" --depth 2
+```
+
+### Graph → Read
+
+```bash
+# Get graph
+GRAPH=$(curd graph "src/main.rs::main" --depth 1)
+
+# Extract dependencies
+DEPS=$(echo $GRAPH | jq -r '.graph.edges[] | select(.kind=="calls") | .to')
+
+# Read each dependency
+for dep in $DEPS; do
+  curd read "$dep"
+done
+```
+
+### Graph → Diagram
+
+```bash
+# Generate visual diagram from graph
+curd diagram --uris "src/auth.rs::validate" --depth 2 --format mermaid
+```
+
+See [diagram command](/cli/graph#diagram) for visualization.
+
+## Graph Statistics
+
+Output includes statistics:
+
+```json
+{
+  "stats": {
+    "total_nodes": 25,
+    "total_edges": 38,
+    "max_depth_reached": 3,
+    "cycles_detected": 1,
+    "broken_links": 2
+  }
+}
+```
+
+- **total_nodes**: Unique symbols in graph
+- **total_edges**: Relationships found
+- **max_depth_reached**: Actual depth explored
+- **cycles_detected**: Number of circular dependencies
+- **broken_links**: Unresolved references
+
+## Confidence Scores
+
+Each edge has a confidence score:
+
+```json
+{
+  "from": "src/a.rs::func",
+  "to": "src/b.rs::helper",
+  "confidence": 0.95
+}
+```
+
+- **0.9 - 1.0**: High confidence (direct call, clear import)
+- **0.7 - 0.9**: Medium confidence (inferred, indirect)
+- **< 0.7**: Low confidence (uncertain, heuristic)
+
+Low confidence edges may indicate:
+- Dynamic calls
+- Reflection/macros
+- External dependencies
+- Incomplete indexing
+
+## Performance Considerations
+
+### Large Graphs
+
+For large codebases or deep graphs:
+
+```bash
+# Start shallow
+curd graph "src/main.rs::main" --depth 1
+
+# Increase gradually
+curd graph "src/main.rs::main" --depth 2
+```
+
+### Caching
+
+Graph data is cached in the index:
+
+```bash
+# First run: builds graph
+curd graph "src/lib.rs::func" --depth 2  # Slower
+
+# Subsequent runs: uses cache
+curd graph "src/lib.rs::func" --depth 2  # Faster
+```
+
+Rebuild index to refresh:
+
+```bash
+curd doctor
+```
+
+## Troubleshooting
+
+### No Edges Found
+
+```bash
+$ curd graph "src/isolated.rs::func" --depth 1
+# Returns empty edges array
+```
+
+Possible causes:
+- Symbol truly has no dependencies
+- Index incomplete
+- Symbol in dead code
+
+Verify:
+```bash
+curd test edges --verbose
+curd doctor
+```
+
+### Broken Links
+
+```bash
+# Check for unresolved references
+curd graph "src/lib.rs::main" --depth 2
+# Look for broken_links > 0 in stats
+```
+
+Fix:
+```bash
+curd test edges --verbose  # Show broken links
+curd doctor               # Rebuild index
+```
+
+### Performance Issues
+
+```bash
+# Graph taking too long at depth 4
+curd graph "src/main.rs::main" --depth 4
+```
+
+Solutions:
+- Reduce depth: Start at 2, increase if needed
+- Limit scope: Graph specific modules, not `main`
+- Use lazy indexing for faster queries
+
+## Related Commands
+
+<CardGroup cols={2}>
+  <Card title="read" icon="book" href="/cli/read">
+    Read symbols found in graph
+  </Card>
+  <Card title="diagram" icon="diagram-project" href="/cli/graph#diagram">
+    Visualize dependency graphs
+  </Card>
+  <Card title="test" icon="vial" href="/cli/workspace#semantic-tests">
+    Check graph integrity
+  </Card>
+  <Card title="search" icon="magnifying-glass" href="/cli/search">
+    Find symbols to graph
+  </Card>
+</CardGroup>

@@ -1,0 +1,252 @@
+---
+title: Understanding Codebases
+description: Use CURD's semantic search, read, and graph tools to navigate and understand code structure
+---
+
+CURD provides three complementary tools for code understanding: search for discovery, read for inspection, and graph for impact analysis. All tools operate on CURD's semantic graph built from Tree-sitter AST parsing.
+
+## URI Format
+
+CURD uses a structured URI format to reference code elements:
+
+```
+file_path::symbol_name
+file_path::symbol_name::line_number
+```
+
+<Note>
+URIs are structural identifiers, not file system paths. They reference symbols in the semantic graph.
+</Note>
+
+### URI Examples
+
+```bash
+src/lib.rs::alpha              # Function named alpha
+src/auth.rs::validate          # Function named validate  
+src/utils.py::helper           # Python function
+src/main.rs::main::42          # Line 42 within main function
+```
+
+## Search: Symbol Discovery
+
+The `search` tool provides BM25-ranked symbol search backed by a SQLite FTS5 index.
+
+### Search Modes
+
+<Steps>
+  <Step title="Symbol Mode">
+    Structural AST search for functions, classes, and methods
+    
+    ```bash
+    curd search alpha --mode symbol
+    ```
+  </Step>
+  
+  <Step title="Text Mode">
+    Literal grep-style text search across source files
+    
+    ```bash
+    curd search "API_SECRET" --mode text
+    ```
+  </Step>
+  
+  <Step title="Tiered Mode">
+    Combined approach: seed symbols, structured search, and local database
+    
+    ```bash
+    curd search validate --mode tiered
+    ```
+  </Step>
+</Steps>
+
+### Ranked Results
+
+Search returns BM25-ranked results sorted by relevance:
+
+```json
+[
+  {
+    "name": "alpha",
+    "kind": "function",
+    "filepath": "src/lib.rs",
+    "line": 15,
+    "score": 12.3
+  }
+]
+```
+
+<Tip>
+Results are automatically limited to 100 symbols. Use kind filters to narrow results:
+`--kind function`, `--kind class`, or `--kind method`.
+</Tip>
+
+### Search from Code
+
+The SearchEngine uses FTS5 for fast ranked search:
+
+```rust
+let storage = Storage::open(&workspace_root, cfg)?;
+let results = storage.search_ranked(query, Some(100))?;
+```
+
+## Read: Source Inspection
+
+The `read` tool extracts exact source code using AST boundaries.
+
+### Reading Symbols
+
+<CodeGroup>
+```bash CLI
+curd read src/lib.rs::alpha
+```
+
+```bash Multiple URIs
+curd read src/main.rs::main Cargo.toml
+```
+
+```bash With Verbosity
+curd read src/auth.rs::validate --verbosity 1
+```
+</CodeGroup>
+
+### Verbosity Levels
+
+- **0** (outline): Shows signature and structure without implementation
+- **1** (full source): Returns complete source code with exact AST boundaries
+
+<Warning>
+Always prefer `curd read` over `cat`, `head`, or `tail`. The read engine respects AST boundaries and never truncates mid-logic.
+</Warning>
+
+### URI Parsing
+
+The ReadEngine splits URIs into components:
+
+```rust
+let parts: Vec<&str> = uri.split("::").collect();
+let file_part = parts.first().copied().unwrap_or("");
+let symbol_part = parts.get(1).copied();
+let line_part = parts.get(2).copied().and_then(|l| l.parse::<usize>().ok());
+```
+
+File reads return the entire file. Symbol reads return the enclosing function/class extracted via Tree-sitter queries.
+
+### Read Response Format
+
+```json
+[
+  {
+    "uri": "src/lib.rs::alpha",
+    "name": "alpha",
+    "kind": "function",
+    "source": "pub fn alpha() {\n    println!(\"hello\");\n}",
+    "filepath": "src/lib.rs",
+    "line": 15
+  }
+]
+```
+
+## Graph: Impact Analysis
+
+The `graph` tool provides O(1) dependency traversal using CURD's Universal Semantic Linker.
+
+### Graph Direction
+
+<Steps>
+  <Step title="Up (Callers)">
+    Find all functions that call this symbol
+    
+    ```bash
+    curd graph src/lib.rs::execute --direction up --depth 2
+    ```
+  </Step>
+  
+  <Step title="Down (Callees)">
+    Find all functions this symbol calls
+    
+    ```bash
+    curd graph src/main.rs::main --direction down --depth 3
+    ```
+  </Step>
+  
+  <Step title="Both">
+    Complete blast radius in both directions
+    
+    ```bash
+    curd graph src/auth.rs::validate --direction both --depth 2
+    ```
+  </Step>
+</Steps>
+
+### Cross-Language Support
+
+The graph engine resolves cross-language boundaries:
+
+- Rust `extern` declarations to C++ definitions
+- TypeScript `declare` statements to JavaScript implementations  
+- Python imports to module definitions
+
+<Tip>
+Use `graph` before making changes to understand the blast radius. A depth of 2-3 typically reveals immediate impact.
+</Tip>
+
+## Workflow Example
+
+Complete workflow for understanding a symbol before modification:
+
+<Steps>
+  <Step title="Search">
+    Find the symbol location
+    
+    ```bash
+    curd search validate --mode symbol
+    ```
+  </Step>
+  
+  <Step title="Read">
+    Inspect the implementation
+    
+    ```bash
+    curd read src/auth.rs::validate --verbosity 1
+    ```
+  </Step>
+  
+  <Step title="Graph">
+    Analyze callers and dependencies
+    
+    ```bash
+    curd graph src/auth.rs::validate --direction both --depth 2
+    ```
+  </Step>
+</Steps>
+
+### Integration Example
+
+From the GETTING_STARTED guide:
+
+```bash
+curd search alpha
+curd read src/lib.rs::alpha
+curd graph src/lib.rs::alpha --direction both --depth 2
+```
+
+This gives you:
+- A symbol hit from search
+- Direct source read with AST boundaries  
+- Quick impact neighborhood from graph traversal
+
+## Context Aliases
+
+Read supports context aliases for linked repositories:
+
+```bash
+curd read @upstream::src/lib.rs::main
+```
+
+Context modes:
+- **Index**: Search-only access (reads prohibited)
+- **Full**: Complete read access to linked workspace
+
+<Note>
+Context aliases are configured via the ContextRegistry in `.curd/contexts.json`.
+</Note>

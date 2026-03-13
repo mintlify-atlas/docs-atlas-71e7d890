@@ -1,0 +1,475 @@
+---
+title: 'Build Adapters'
+description: 'Auto-detection, built-in adapters, and custom build system integration'
+---
+
+CURD supports 20+ built-in build systems and allows custom adapters via `settings.toml`. Adapter detection combines file markers, language plugins, and explicit configuration.
+
+## Supported Build Systems
+
+CURD ships with native support for:
+
+<CardGroup cols={3}>
+  <Card title="Rust" icon="rust">
+    `cargo`, `cargo zigbuild`
+  </Card>
+  <Card title="C/C++" icon="c">
+    `cmake`, `ninja`, `make`, `meson`, `bazel`, `buck2`
+  </Card>
+  <Card title="Python" icon="python">
+    `uv`, `poetry`, `pip`, `conda`, `mamba`, `pixi`
+  </Card>
+  <Card title="JavaScript" icon="js">
+    `npm`, `yarn`, `pnpm`, `bun`
+  </Card>
+  <Card title="Go" icon="golang">
+    `go build`
+  </Card>
+  <Card title="Java" icon="java">
+    `gradle`, `maven`
+  </Card>
+  <Card title="Tooling" icon="wrench">
+    `mise` (multi-language task runner)
+  </Card>
+</CardGroup>
+
+---
+
+## Adapter Detection
+
+CURD auto-detects build systems in this order:
+
+<Steps>
+  <Step title="Custom Adapters">
+    Checks `[build.adapters.*]` in `settings.toml` for matching `detect_files`
+  </Step>
+  
+  <Step title="Language Plugin Build Systems">
+    Queries installed `.curdl` plugins for `build_system` metadata matching file extensions
+  </Step>
+  
+  <Step title="Built-in Adapters">
+    Scans workspace for known markers (e.g., `Cargo.toml`, `package.json`, `CMakeLists.txt`)
+  </Step>
+  
+  <Step title="Fallback">
+    Defaults to `make` if no adapter is detected
+  </Step>
+</Steps>
+
+### Detection Logic
+
+```rust
+// From curd-core/src/build.rs:239-345 (simplified)
+fn detect_adapter(root: &Path, cfg: &CurdConfig) -> String {
+    // 1. Custom adapters from settings.toml
+    for (name, adapter) in &cfg.build.adapters {
+        let matched = adapter.detect_files.iter().all(|f| root.join(f).exists());
+        if matched {
+            return name.clone();
+        }
+    }
+
+    // 2. Language plugin adapters
+    if let Some(adapter) = detect_language_plugin_adapter(root, cfg) {
+        return adapter;
+    }
+
+    // 3. Built-in adapters
+    if root.join("Cargo.toml").exists() {
+        return "cargo".to_string();
+    }
+    if root.join("CMakeLists.txt").exists() {
+        return "cmake".to_string();
+    }
+    if root.join("package.json").exists() {
+        if root.join("pnpm-lock.yaml").exists() {
+            return "pnpm".to_string();
+        }
+        if root.join("yarn.lock").exists() {
+            return "yarn".to_string();
+        }
+        if root.join("bun.lockb").exists() {
+            return "bun".to_string();
+        }
+        return "npm".to_string();
+    }
+    // ... 15+ more checks
+
+    "make".to_string() // Fallback
+}
+```
+
+---
+
+## Dry-Run vs Execute
+
+Build requests support two modes:
+
+### Dry-Run (Default)
+
+Plans the build steps without execution:
+
+```bash
+curd build --adapter cargo --profile release
+```
+
+**Output:**
+
+```json
+{
+  "status": "ok",
+  "adapter": "cargo",
+  "profile": "release",
+  "execute": false,
+  "steps": [
+    {
+      "adapter": "cargo",
+      "cwd": "/workspace/root",
+      "command": ["cargo", "build", "--release"],
+      "status": null,
+      "success": null
+    }
+  ]
+}
+```
+
+### Execute Mode
+
+Runs the planned steps and captures errors:
+
+```bash
+curd build --adapter cargo --profile release --execute
+```
+
+CURD:
+- Executes steps sequentially
+- Streams stderr to console
+- Logs to `.curd/builds/latest.log`
+- Parses compiler errors and maps to AST symbols
+
+```rust
+// From curd-core/src/build.rs:851-941 (error mapping)
+fn parse_and_propagate_faults(root: &Path, stderr: &str) {
+    let storage = Storage::open(root, &cfg)?;
+    let graph_engine = GraphEngine::new(root);
+
+    for line in stderr.lines() {
+        let extracted = parse_error_line(line); // Rust, Python, C++, Node.js
+        if let Some((filepath, line_num)) = extracted {
+            if let Ok(Some(symbol_id)) = storage.get_symbol_at_line(&filepath, line_num) {
+                log::info!("Mapped build error to symbol: {}", symbol_id);
+                graph_engine.annotate_fault(&symbol_id, uuid::Uuid::new_v4());
+            }
+        }
+    }
+}
+```
+
+<Note>
+  Error mapping enables semantic blast radius analysis: `graph` queries on faulted symbols show downstream impact.
+</Note>
+
+---
+
+## Custom Adapters
+
+Define workspace-specific build systems in `settings.toml`:
+
+```toml
+[build]
+preferred_adapter = "acme-build"
+
+[build.adapters.acme-build]
+detect_files = ["acme.build", "src/main.acme"]
+cwd = "."
+steps = [
+  ["acme-compiler", "--check"],
+  ["acme-compiler", "--build", "--profile={profile}"],
+  ["acme-linker", "{target}"]
+]
+```
+
+<ParamField path="detect_files" type="array" required>
+  List of file paths that must exist for auto-detection. Paths are workspace-relative.
+</ParamField>
+
+<ParamField path="cwd" type="string" default=".">
+  Working directory for all steps (workspace-relative). Cannot escape workspace root.
+</ParamField>
+
+<ParamField path="steps" type="array" required>
+  List of command arrays. Supports `{profile}` and `{target}` placeholders.
+</ParamField>
+
+### Variable Substitution
+
+Steps support dynamic placeholders:
+
+- `{profile}`: Replaced with `--profile` value (e.g., `debug`, `release`)
+- `{target}`: Replaced with `--target` value (e.g., `x86_64-unknown-linux-gnu`)
+
+**Example:**
+
+```bash
+curd build --adapter acme-build --profile release --target linux-x64
+```
+
+**Expands to:**
+
+```bash
+acme-compiler --check
+acme-compiler --build --profile=release
+acme-linker linux-x64
+```
+
+---
+
+## Built-in Adapter Examples
+
+### Cargo (Rust)
+
+```rust
+// From curd-core/src/build.rs:462-484
+"cargo" => {
+    let mut cmd = if zig {
+        vec!["cargo".to_string(), "zigbuild".to_string()]
+    } else {
+        vec!["cargo".to_string(), "build".to_string()]
+    };
+    if lower_profile == "release" {
+        cmd.push("--release".to_string());
+    }
+    if let Some(t) = target.clone() {
+        cmd.push("--target".to_string());
+        cmd.push(t);
+    }
+    cmd.extend(trailing_args.iter().cloned());
+    steps.push(BuildStep { adapter, cwd: root_s, command: cmd, .. });
+}
+```
+
+**Usage:**
+
+```bash
+curd build --adapter cargo --profile release --target x86_64-unknown-linux-musl --execute
+```
+
+### CMake (C/C++)
+
+```rust
+// From curd-core/src/build.rs:485-527
+"cmake" => {
+    if !build_dir_path.exists() {
+        let mut cfg_cmd = vec!["cmake", "-S", ".", "-B", build_dir];
+        if lower_profile == "release" {
+            cfg_cmd.push("-DCMAKE_BUILD_TYPE=Release");
+        } else {
+            cfg_cmd.push("-DCMAKE_BUILD_TYPE=Debug");
+        }
+        steps.push(BuildStep { command: cfg_cmd, .. });
+    }
+    let mut build_cmd = vec!["cmake", "--build", build_dir];
+    if lower_profile == "release" {
+        build_cmd.push("--config");
+        build_cmd.push("Release");
+    }
+    if let Some(t) = target.clone() {
+        build_cmd.push("--target");
+        build_cmd.push(t);
+    }
+    steps.push(BuildStep { command: build_cmd, .. });
+}
+```
+
+**Usage:**
+
+```bash
+curd build --adapter cmake --profile release --target install --execute
+```
+
+### Python (uv)
+
+```rust
+// From curd-core/src/build.rs:565-575
+"uv" => {
+    let mut cmd = vec!["uv".to_string(), "build".to_string()];
+    cmd.extend(trailing_args.iter().cloned());
+    steps.push(BuildStep { adapter, cwd: root_s, command: cmd, .. });
+}
+```
+
+**Usage:**
+
+```bash
+curd build --adapter uv --execute
+```
+
+---
+
+## Task Mapping
+
+Define reusable build tasks in `settings.toml`:
+
+```toml
+[build.tasks]
+full = "cargo build --all-features --release"
+test = "cargo test --all"
+lint = "cargo clippy -- -D warnings"
+```
+
+**Usage:**
+
+```bash
+curd build --target full --execute
+curd build --target test --execute
+curd build --target lint --execute
+```
+
+Tasks override the default adapter behavior:
+
+```rust
+// From curd-core/src/build.rs:52-64
+if let Some(ref t) = req.target {
+    if let Some(task_cmd) = cfg.build.tasks.get(t) {
+        if req.command.is_none() {
+            let mut full_cmd = task_cmd.clone();
+            if !req.trailing_args.is_empty() {
+                full_cmd.push(' ');
+                full_cmd.push_str(&req.trailing_args.join(" "));
+            }
+            req.command = Some(full_cmd);
+        }
+    }
+}
+```
+
+---
+
+## Security Boundaries
+
+### Raw Command Policy
+
+Raw shell commands require explicit policy opt-in:
+
+```toml
+[policy.exec]
+allow_raw_command = false
+```
+
+**Blocked:**
+
+```bash
+curd build --command "rm -rf /" --execute
+# Error: Raw build commands are disabled by [policy.exec].
+```
+
+### Custom Adapter Trust
+
+Custom adapters trigger an untrusted confirmation gate:
+
+```bash
+curd build --adapter acme-build --execute
+# Response: untrusted_confirmation_required: true
+```
+
+Bypass with `--allow-untrusted`:
+
+```bash
+curd build --adapter acme-build --execute --allow-untrusted
+```
+
+```rust
+// From curd-core/src/build.rs:103-131
+let is_custom = !matches!(
+    adapter.as_str(),
+    "cargo" | "cmake" | "ninja" | "make" | "uv" | "poetry" | "pip" |
+    "conda" | "mamba" | "go" | "gradle" | "maven" | "bazel" |
+    "meson" | "buck2" | "npm" | "yarn" | "pnpm" | "bun" |
+    "pixi" | "mise"
+);
+
+if is_custom && !req.allow_untrusted && req.execute {
+    untrusted_confirmation_required = true;
+}
+```
+
+<Warning>
+  Custom adapter `steps` and `cwd` are validated to prevent path traversal. Relative paths outside the workspace root are rejected.
+</Warning>
+
+---
+
+## Language Plugin Integration
+
+Installed `.curdl` plugins can declare `build_system` metadata:
+
+```json
+{
+  "language": {
+    "language_id": "acme",
+    "extensions": [".acme"],
+    "build_system": "acme-build"
+  }
+}
+```
+
+When workspace contains `*.acme` files, CURD auto-selects `acme-build` if:
+
+1. A matching `[build.adapters.acme-build]` exists in `settings.toml`, OR
+2. `acme-build` is a built-in adapter name
+
+```rust
+// From curd-core/src/build.rs:347-383
+fn detect_language_plugin_adapter(root: &Path, cfg: &CurdConfig) -> Option<String> {
+    if !cfg.plugins.enabled {
+        return None;
+    }
+    let installed = load_installed_plugins(root, &cfg.plugins, PluginKind::Language).ok()?;
+    let mut by_adapter: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    for record in installed {
+        let Some(spec) = record.language else { continue };
+        let Some(build_system) = spec.build_system.filter(|s| !s.trim().is_empty()) else { continue };
+        if !adapter_known(cfg, &build_system) {
+            continue;
+        }
+        for ext in spec.extensions {
+            by_adapter.entry(build_system.clone()).or_default().push(ext.trim_start_matches('.').to_string());
+        }
+    }
+    for (adapter, extensions) in by_adapter {
+        if workspace_has_any_extension(root, &extensions) {
+            return Some(adapter);
+        }
+    }
+    None
+}
+```
+
+<Note>
+  Language plugin adapters are detected **before** built-in adapters but **after** custom adapters from `settings.toml`.
+</Note>
+
+---
+
+## Configuration Reference
+
+```toml
+[build]
+preferred_adapter = "cargo"        # Override auto-detection
+default_profile = "debug"          # Default --profile value
+default_target = "x86_64-linux"    # Default --target value
+build_dir = "build"                # CMake/Meson build directory
+
+[build.tasks]
+release = "cargo build --release"
+test = "cargo test --all"
+
+[build.adapters.custom]
+detect_files = ["custom.build"]
+cwd = "."
+steps = [["custom-tool", "build"]]
+
+[policy.exec]
+allow_raw_command = false
+```

@@ -1,0 +1,266 @@
+---
+title: Installation
+description: Install CURD on macOS, Linux, or Windows using your preferred package manager
+---
+
+CURD is distributed via native OS packages, language-bound wrappers, and container images.
+
+## Native OS Package Managers
+
+Choose the installation method that matches your operating system:
+
+<Tabs>
+  <Tab title="macOS / Linux">
+    ### Homebrew
+    
+    ```bash
+    brew tap aerospeedsta/curd
+    brew install curd
+    ```
+    
+    Verify the installation:
+    
+    ```bash
+    curd --version
+    ```
+  </Tab>
+  
+  <Tab title="Windows">
+    ### Winget
+    
+    ```powershell
+    winget install curd
+    ```
+    
+    ### Scoop
+    
+    ```powershell
+    scoop bucket add curd https://github.com/aerospeedsta/curd-scoop.git
+    scoop install curd
+    ```
+    
+    Verify the installation:
+    
+    ```powershell
+    curd --version
+    ```
+  </Tab>
+  
+  <Tab title="Arch Linux">
+    ### AUR
+    
+    Using `paru`:
+    
+    ```bash
+    paru -S curd-bin
+    ```
+    
+    Or using `yay`:
+    
+    ```bash
+    yay -S curd-bin
+    ```
+    
+    Verify the installation:
+    
+    ```bash
+    curd --version
+    ```
+  </Tab>
+  
+  <Tab title="Debian / Ubuntu">
+    ### APT
+    
+    Download the `.deb` package from [GitHub Releases](https://github.com/bharath/CURD/releases/latest):
+    
+    ```bash
+    wget https://github.com/bharath/CURD/releases/latest/download/curd_amd64.deb
+    sudo dpkg -i curd_amd64.deb
+    ```
+    
+    Verify the installation:
+    
+    ```bash
+    curd --version
+    ```
+  </Tab>
+  
+  <Tab title="Fedora / RHEL">
+    ### DNF
+    
+    Download the `.rpm` package from [GitHub Releases](https://github.com/bharath/CURD/releases/latest):
+    
+    ```bash
+    wget https://github.com/bharath/CURD/releases/latest/download/curd_x86_64.rpm
+    sudo rpm -i curd_x86_64.rpm
+    ```
+    
+    Verify the installation:
+    
+    ```bash
+    curd --version
+    ```
+  </Tab>
+</Tabs>
+
+## Wrapper Launchers (Instant Run)
+
+Run CURD instantly without system-level installation using language wrappers:
+
+<CodeGroup>
+
+```bash Python (uvx)
+# Run CURD directly
+uvx --from curd-python curd --version
+
+# Example usage
+uvx --from curd-python curd init
+uvx --from curd-python curd search alpha
+```
+
+```bash Node.js (bunx)
+# Run CURD directly
+bunx --bun curd-node --version
+
+# Example usage
+bunx --bun curd-node init
+bunx --bun curd-node search alpha
+```
+
+</CodeGroup>
+
+<Note>
+  Wrapper launchers are perfect for trying CURD without permanent installation or for CI/CD pipelines.
+</Note>
+
+## Language Bindings
+
+Install CURD as a library in your Python or Node.js projects:
+
+<Tabs>
+  <Tab title="Python">
+    ### Using pip
+    
+    ```bash
+    pip install curd-python
+    ```
+    
+    ### Using uv
+    
+    ```bash
+    cd curd-python
+    uv pip install .
+    ```
+    
+    Usage:
+    
+    ```python
+    from curd_python import Curd
+    
+    # Initialize CURD
+    curd = Curd()
+    ```
+  </Tab>
+  
+  <Tab title="Node.js">
+    ### Using npm
+    
+    ```bash
+    npm install curd-node
+    ```
+    
+    ### Using bun
+    
+    ```bash
+    cd curd-node
+    bun install
+    ```
+    
+    Usage:
+    
+    ```javascript
+    const { Curd } = require('curd-node');
+    
+    // Initialize CURD
+    const curd = new Curd();
+    ```
+  </Tab>
+</Tabs>
+
+## Containerized MCP
+
+Serve the CURD MCP server via Docker:
+
+```bash
+docker run -it --rm -v $(pwd):/workspace aerospeedsta/curd:latest
+```
+
+<Note>
+  The Docker image is ideal for isolated environments and CI/CD workflows.
+</Note>
+
+## Building from Source
+
+If you prefer to build CURD from source:
+
+<Steps>
+  <Step title="Clone the repository">
+    ```bash
+    git clone https://github.com/bharath/CURD.git
+    cd CURD
+    ```
+  </Step>
+  
+  <Step title="Build with Cargo">
+    ```bash
+    cargo build --release
+    ```
+    
+    The binary will be available at `target/release/curd`.
+  </Step>
+  
+  <Step title="Add to PATH (optional)">
+    ```bash
+    export PATH="$PATH:$(pwd)/target/release"
+    ```
+    
+    Or copy the binary to a directory in your PATH:
+    
+    ```bash
+    sudo cp target/release/curd /usr/local/bin/
+    ```
+  </Step>
+  
+  <Step title="Verify installation">
+    ```bash
+    curd --version
+    ```
+  </Step>
+</Steps>
+
+## Installation Summary
+
+| Platform | Method | Command |
+| :--- | :--- | :--- |
+| **macOS / Linux** | Homebrew | `brew tap aerospeedsta/curd && brew install curd` |
+| **Windows** | Winget | `winget install curd` |
+| **Windows** | Scoop | `scoop bucket add curd ... && scoop install curd` |
+| **Arch Linux** | AUR | `paru -S curd-bin` |
+| **Debian / Ubuntu** | APT | `sudo dpkg -i curd_amd64.deb` |
+| **Fedora / RHEL** | DNF | `sudo rpm -i curd_x86_64.rpm` |
+| **Python** | uvx | `uvx --from curd-python curd` |
+| **Node.js** | bunx | `bunx --bun curd-node` |
+| **Docker** | Container | `docker run aerospeedsta/curd:latest` |
+
+## Next Steps
+
+After installation, initialize CURD in your project:
+
+```bash
+curd init
+curd doctor .
+```
+
+<Card title="Quick Start Guide" icon="rocket" href="/quickstart">
+  Learn how to use CURD with a step-by-step tutorial
+</Card>

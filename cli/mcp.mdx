@@ -1,0 +1,434 @@
+---
+title: curd mcp
+description: Start the Model Context Protocol server for AI agent integration
+---
+
+## Overview
+
+The `curd mcp` command starts a Model Context Protocol (MCP) server that exposes CURD's tools and capabilities to AI agents over stdin/stdout.
+
+```bash
+curd mcp [root]
+```
+
+## Usage
+
+```bash
+# Start MCP server in current directory
+curd mcp
+
+# Start in specific workspace
+curd mcp /path/to/workspace
+
+# Legacy shorthand (positional root argument)
+curd /path/to/workspace
+```
+
+## Arguments
+
+<ParamField path="root" type="PathBuf" default=".">
+  Path to the workspace root.
+  
+  The MCP server operates on this workspace, exposing its index, files, and mutation capabilities.
+</ParamField>
+
+## How It Works
+
+The MCP server:
+
+1. **Initializes** workspace context
+2. **Validates** `.curd/` configuration exists
+3. **Listens** on stdin for JSON-RPC requests
+4. **Writes** JSON-RPC responses to stdout
+5. **Routes** tool calls through validation layer
+6. **Enforces** profile, policy, and session requirements
+
+## Protocol
+
+CURD implements the [Model Context Protocol specification](https://modelcontextprotocol.io/specification).
+
+### Transport
+
+- **Input**: stdin (JSON-RPC requests)
+- **Output**: stdout (JSON-RPC responses)
+- **Errors**: stderr (logs and diagnostics)
+
+### Message Format
+
+JSON-RPC 2.0:
+
+**Request**:
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "method": "tools/call",
+  "params": {
+    "name": "search",
+    "arguments": {
+      "query": "authentication",
+      "mode": "symbol"
+    }
+  }
+}
+```
+
+**Response**:
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "result": {
+    "content": [
+      {
+        "type": "text",
+        "text": "{\"results\":[{\"symbol\":\"validate_token\",...}]}"
+      }
+    ]
+  }
+}
+```
+
+## Available Tools
+
+The MCP server exposes all CURD tools:
+
+### Read-Only
+
+- `search` - Semantic symbol search
+- `read` - Read files/symbols
+- `graph` - Dependency traversal
+- `workspace` (status/list/dependencies) - Workspace info
+
+### Mutating (require session)
+
+- `edit` - AST-aware mutations
+- `refactor` - Rename/move/extract
+- `workspace` (begin/commit/rollback) - Session management
+- `execute_dsl` - Execute .curd scripts
+- `execute_plan` - Execute compiled plans
+
+### Execution
+
+- `run` - Execute shell commands (sandboxed)
+- `build` - Build system integration
+- `test` - Run tests
+
+### Management
+
+- `config` - Workspace configuration
+- `context` - External repository linking
+- `plugin_language`, `plugin_tool`, `plugin_trust` - Plugin management
+
+See `tools/list` endpoint for complete list with metadata.
+
+## Tool Metadata
+
+Query available tools:
+
+```json
+{
+  "method": "tools/list"
+}
+```
+
+Response includes:
+```json
+{
+  "tools": [
+    {
+      "name": "search",
+      "description": "Semantic search across indexed symbols",
+      "inputSchema": { ... },
+      "metadata": {
+        "capability": "lookup",
+        "canonical_operation": "search",
+        "available_in_lite": true,
+        "session_required": false,
+        "approval_required": false
+      }
+    },
+    {
+      "name": "edit",
+      "description": "AST-aware code mutations",
+      "inputSchema": { ... },
+      "metadata": {
+        "capability": "change.apply",
+        "canonical_operation": "edit",
+        "available_in_lite": true,
+        "session_required": true,
+        "approval_required": true
+      }
+    }
+  ]
+}
+```
+
+Use metadata to:
+- Check tool availability in current mode
+- Understand session requirements
+- Adapt to approval workflows
+
+## Session Management
+
+Mutating operations require active session:
+
+```json
+// 1. Begin session
+{
+  "method": "tools/call",
+  "params": {
+    "name": "workspace",
+    "arguments": {"action": "begin"}
+  }
+}
+
+// 2. Make edits
+{
+  "method": "tools/call",
+  "params": {
+    "name": "edit",
+    "arguments": {
+      "uri": "src/lib.rs::func",
+      "code": "..."
+    }
+  }
+}
+
+// 3. Commit
+{
+  "method": "tools/call",
+  "params": {
+    "name": "workspace",
+    "arguments": {"action": "commit"}
+  }
+}
+```
+
+## Profile Configuration
+
+MCP server respects profile from `settings.toml`:
+
+```toml
+[runtime]
+ceiling = "full"  # or "lite"
+
+[profiles.default]
+role = "assist_agent"
+capabilities = ["lookup", "read"]
+session_required_for_change = true
+```
+
+Tools are gated by profile capabilities:
+
+```json
+// Profile lacks 'change.apply'
+{
+  "method": "tools/call",
+  "params": {
+    "name": "edit",
+    "arguments": {...}
+  }
+}
+
+// Response:
+{
+  "error": {
+    "code": -32001,
+    "message": "PROFILE_DENIED: 'assist_agent' profile cannot execute 'change.apply'"
+  }
+}
+```
+
+See [profiles](/cli/profiles) for configuration.
+
+## Agent Configuration
+
+### Claude Desktop
+
+Add to `claude_desktop_config.json`:
+
+```json
+{
+  "mcpServers": {
+    "curd": {
+      "command": "curd",
+      "args": ["mcp", "/path/to/workspace"]
+    }
+  }
+}
+```
+
+### Cursor
+
+Add to Cursor settings:
+
+```json
+{
+  "mcp": {
+    "servers": {
+      "curd": {
+        "command": "curd",
+        "args": ["mcp", "${workspaceFolder}"]
+      }
+    }
+  }
+}
+```
+
+### Generic MCP Client
+
+```javascript
+import { Client } from '@modelcontextprotocol/sdk';
+import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
+
+const transport = new StdioClientTransport({
+  command: 'curd',
+  args: ['mcp', '/path/to/workspace']
+});
+
+const client = new Client(
+  { name: 'my-agent', version: '1.0.0' },
+  { capabilities: {} }
+);
+
+await client.connect(transport);
+
+// Call tools
+const result = await client.callTool({
+  name: 'search',
+  arguments: { query: 'authenticate' }
+});
+```
+
+## Initialization
+
+Use `InitAgent` to set up MCP configuration:
+
+```bash
+curd init-agent --harness claude_desktop
+```
+
+Aliases: `curd ina`, `curd agt`
+
+Options:
+<ParamField path="--name" type="string">
+  Agent identifier (e.g., 'alpha', 'claude_coder').
+  
+  Use commas for multiple names:
+  ```bash
+  curd init-agent --name "alpha,beta"
+  ```
+</ParamField>
+
+<ParamField path="--harness" type="string">
+  Target harness to configure:
+  - `gemini`
+  - `cursor`
+  - `claude_desktop`
+  - `claude_code`
+  
+  Auto-detects if omitted.
+</ParamField>
+
+<ParamField path="root" type="PathBuf" default=".">
+  Workspace root
+</ParamField>
+
+Example:
+```bash
+curd init-agent --name claude --harness claude_desktop .
+# Creates keypair, configures claude_desktop_config.json
+```
+
+## Error Handling
+
+### Workspace Not Initialized
+
+```json
+{
+  "error": {
+    "code": -32000,
+    "message": "Workspace not initialized. Run: curd init"
+  }
+}
+```
+
+### Session Required
+
+```json
+{
+  "error": {
+    "code": -32001,
+    "message": "SESSION_REQUIRED: edit requires active workspace session"
+  }
+}
+```
+
+### Profile Denied
+
+```json
+{
+  "error": {
+    "code": -32001,
+    "message": "PROFILE_DENIED: 'assist' profile cannot execute 'change.apply'"
+  }
+}
+```
+
+### Ceiling Denied
+
+```json
+{
+  "error": {
+    "code": -32001,
+    "message": "CEILING_DENIED: 'build' not available in 'lite' mode"
+  }
+}
+```
+
+## Logging
+
+MCP server logs to stderr:
+
+```bash
+# Capture logs
+curd mcp 2> mcp-server.log
+
+# Or view in real-time
+curd mcp 2>&1 | tee mcp-server.log
+```
+
+Log levels controlled by `RUST_LOG`:
+```bash
+RUST_LOG=debug curd mcp
+```
+
+## Security
+
+MCP server enforces:
+
+1. **Profile capabilities** - Tool access gated by profile
+2. **Session requirements** - Mutations require shadow workspace
+3. **Policy checks** - Blocklists, allowlists, path restrictions
+4. **Sandboxing** - Shell commands run in isolated environment
+5. **Audit logging** - All operations logged to `.curd/traces/`
+
+See [control plane documentation](/advanced/control-plane) for security details.
+
+## Related Commands
+
+<CardGroup cols={2}>
+  <Card title="init-agent" icon="robot" href="/cli/mcp#initialization">
+    Configure agent harness
+  </Card>
+  <Card title="profiles" icon="user-shield" href="/cli/profiles">
+    Configure agent capabilities
+  </Card>
+  <Card title="workspace" icon="code-branch" href="/cli/workspace">
+    Session management for agents
+  </Card>
+  <Card title="settings" icon="gear" href="/cli/settings">
+    Workspace configuration
+  </Card>
+</CardGroup>

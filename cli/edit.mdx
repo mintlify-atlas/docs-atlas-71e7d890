@@ -1,0 +1,399 @@
+---
+title: curd edit
+description: AST-aware code mutations with optimistic concurrency and overload resolution
+---
+
+## Overview
+
+The `curd edit` command performs AST-aware mutations on files or symbols using the EditEngine. All edits require an active shadow workspace session and support optimistic concurrency control.
+
+```bash
+curd edit <uri> [options]
+```
+
+## Usage
+
+```bash
+# Upsert (create or update) a symbol
+curd workspace begin
+curd edit "src/auth.rs::validate" --code "pub fn validate() { ... }"
+curd workspace commit
+
+# Delete a symbol
+curd workspace begin
+curd edit "src/old.rs::deprecated_func" --action delete
+curd workspace commit
+
+# Using alias
+curd e "src/lib.rs::helper" --code "fn helper() {}"
+curd edt "src/main.rs::old" --action delete
+```
+
+## Arguments
+
+<ParamField path="uri" type="string" required>
+  The URI of the file or symbol to edit.
+  
+  **File-level edits**: `path/to/file.ext`
+  - Replaces or creates entire file
+  
+  **Symbol-level edits**: `path/to/file.ext::symbol`
+  - Targets specific function, class, or module
+  - Examples:
+    - `src/auth.rs::validate_token`
+    - `src/models.rs::User::new`
+    - `lib.rs::module::function`
+</ParamField>
+
+## Options
+
+<ParamField path="--action" type="string" default="upsert">
+  The edit action to perform:
+  
+  - `upsert` - Create new symbol or update existing one
+  - `delete` - Remove the symbol from the file
+  
+  For `delete` action, `--code` is ignored.
+</ParamField>
+
+<ParamField path="--code" type="string" default="">
+  The source code to insert. Required for `upsert` action.
+  
+  Use quotes for inline code:
+  ```bash
+  curd edit "src/lib.rs::func" --code "fn func() { println!(\"hello\"); }"
+  ```
+  
+  Or use heredoc for multi-line:
+  ```bash
+  curd edit "src/lib.rs::func" --code "$(
+  cat <<'EOF'
+  pub fn func() {
+      println!("hello");
+  }
+  EOF
+  )"
+  ```
+</ParamField>
+
+<ParamField path="--base-state-hash" type="string">
+  Optional Merkle root hash of expected workspace state for optimistic concurrency control.
+  
+  If provided and the workspace has changed, edit will fail with conflict error.
+  
+  ```bash
+  STATE_HASH=$(curd status --json | jq -r '.merkle_root')
+  curd edit "src/lib.rs::func" --base-state-hash "$STATE_HASH" --code "..."
+  ```
+</ParamField>
+
+<ParamField path="--root" type="string" default=".">
+  Path to the workspace root
+</ParamField>
+
+## Edit Actions
+
+### Upsert
+
+Create new or replace existing symbol:
+
+```bash
+curd workspace begin
+
+# Create new function
+curd edit "src/utils.rs::new_helper" --action upsert --code \
+  "pub fn new_helper(x: i32) -> i32 { x * 2 }"
+
+# Update existing function
+curd edit "src/utils.rs::existing_func" --action upsert --code \
+  "pub fn existing_func() { /* updated */ }"
+
+curd workspace commit
+```
+
+### Delete
+
+Remove symbol from file:
+
+```bash
+curd workspace begin
+
+# Delete function
+curd edit "src/deprecated.rs::old_function" --action delete
+
+# Delete class method
+curd edit "src/models.rs::User::deprecated_method" --action delete
+
+curd workspace commit
+```
+
+## Session Requirement
+
+**All edits require an active shadow workspace session**:
+
+```bash
+# ❌ WILL FAIL
+curd edit "src/lib.rs::func" --code "fn func() {}"
+# Error: SESSION_REQUIRED: edit requires active workspace session
+
+# ✓ CORRECT
+curd workspace begin
+curd edit "src/lib.rs::func" --code "fn func() {}"
+curd workspace commit
+```
+
+See [workspace sessions](/cli/workspace#sessions) for details.
+
+## Overload Resolution
+
+When editing an overloaded symbol (same name, multiple definitions), CURD provides an interactive picker:
+
+```bash
+$ curd edit "src/parser.rs::parse" --code "..."
+
+Symbol 'parse' is overloaded with 3 definitions.
+
+Available options:
+  src/parser.rs::parse:10: fn parse(s: &str) -> i32
+  src/parser.rs::parse:25: fn parse(s: &str) -> f64  
+  src/parser.rs::parse:40: fn parse<T>(s: &str) -> T
+
+? Select which overload to edit:
+❯ src/parser.rs::parse:10: fn parse(s: &str) -> i32
+  src/parser.rs::parse:25: fn parse(s: &str) -> f64
+  src/parser.rs::parse:40: fn parse<T>(s: &str) -> T
+```
+
+To target specific overload directly:
+
+```bash
+curd edit "src/parser.rs::parse:10" --code "..."
+```
+
+## AST-Aware Editing
+
+CURD uses Tree-sitter to ensure edits are syntactically valid:
+
+### Symbol Boundary Detection
+
+Edits respect symbol boundaries:
+
+```rust
+// Original file
+pub fn func_a() { }
+
+pub fn func_b() { }
+
+pub fn func_c() { }
+
+// Edit only func_b
+curd edit "src/lib.rs::func_b" --code "pub fn func_b() { /* updated */ }"
+
+// Result: func_a and func_c unchanged
+pub fn func_a() { }
+
+pub fn func_b() { /* updated */ }
+
+pub fn func_c() { }
+```
+
+### Indentation Preservation
+
+CURD maintains proper indentation:
+
+```rust
+mod auth {
+    pub fn validate() {  // Original at 4-space indent
+        // ...
+    }
+}
+
+// Edit preserves module indentation
+curd edit "src/lib.rs::auth::validate" --code \
+  "pub fn validate() { /* new */ }"
+
+// Result:
+mod auth {
+    pub fn validate() { /* new */ }  // Still at 4-space indent
+}
+```
+
+## Optimistic Concurrency
+
+Prevent conflicting edits with state hashing:
+
+```bash
+# Capture current state
+STATE=$(curd status --json | jq -r '.merkle_root')
+
+# Some time passes, maybe other edits happen...
+
+# Edit with state check
+curd workspace begin
+curd edit "src/lib.rs::func" \
+  --base-state-hash "$STATE" \
+  --code "fn func() {}"
+# → Fails if workspace changed since STATE was captured
+```
+
+## Examples
+
+### Add New Function
+
+```bash
+curd workspace begin
+curd edit "src/helpers.rs::format_date" --code """
+pub fn format_date(timestamp: i64) -> String {
+    // Implementation
+    String::from("formatted")
+}
+"""
+curd workspace commit
+```
+
+### Update Existing Method
+
+```bash
+curd workspace begin
+curd edit "src/server.rs::HttpServer::start" --code """
+pub fn start(&self) -> Result<()> {
+    println!("Starting server on port {}", self.port);
+    self.listen()
+}
+"""
+curd workspace commit
+```
+
+### Remove Deprecated Code
+
+```bash
+curd workspace begin
+curd edit "src/legacy.rs::old_api" --action delete
+curd edit "src/legacy.rs::old_handler" --action delete
+curd workspace diff
+curd workspace commit
+```
+
+### Batch Edits in Transaction
+
+```bash
+curd workspace begin
+
+# Multiple edits in one session
+curd edit "src/auth.rs::login" --code "..."
+curd edit "src/auth.rs::logout" --code "..."
+curd edit "src/auth.rs::old_method" --action delete
+
+# Review all changes
+curd workspace diff
+
+# Commit or rollback all at once
+curd workspace commit
+# or: curd workspace rollback
+```
+
+## Shadow Workspace
+
+Edits are staged in `.curd/shadow/` before commit:
+
+```bash
+curd workspace begin
+# Creates .curd/shadow/root/
+
+curd edit "src/lib.rs::func" --code "..."
+# Writes to .curd/shadow/root/src/lib.rs
+
+curd workspace diff
+# Shows changes in shadow vs. workspace
+
+curd workspace commit
+# Writes shadow changes back to workspace
+# Removes .curd/shadow/
+```
+
+See [workspace management](/cli/workspace) for details.
+
+## Conflict Resolution
+
+If base state hash doesn't match:
+
+```bash
+$ curd edit "src/lib.rs::func" --base-state-hash "abc123" --code "..."
+Edit failed: STATE_CONFLICT: workspace has changed since base state
+
+Expected hash: abc123
+Current hash:  def456
+
+Changed files:
+  - src/other.rs (modified by another session)
+```
+
+Resolution options:
+
+1. **Refresh and retry**:
+   ```bash
+   STATE=$(curd status --json | jq -r '.merkle_root')
+   curd edit ... --base-state-hash "$STATE"
+   ```
+
+2. **Edit without hash** (accept risk of conflicts):
+   ```bash
+   curd edit ... --code "..."
+   ```
+
+3. **Review changes first**:
+   ```bash
+   curd workspace diff
+   ```
+
+## Error Handling
+
+### Missing Session
+
+```bash
+$ curd edit "src/lib.rs::func" --code "..."
+Error: SESSION_REQUIRED: edit requires active workspace session
+
+Run: curd workspace begin
+```
+
+### Parse Error
+
+```bash
+$ curd edit "src/lib.rs::func" --code "invalid syntax !@#"
+Error: PARSE_ERROR: provided code has syntax errors
+
+Line 1: unexpected token '!'
+```
+
+### Symbol Not Found (Upsert Creates It)
+
+```bash
+# Upsert creates new symbol even if it doesn't exist
+curd edit "src/lib.rs::new_func" --code "fn new_func() {}"
+# → Success: creates new function
+```
+
+### Symbol Not Found (Delete Fails)
+
+```bash
+$ curd edit "src/lib.rs::missing" --action delete
+Error: Symbol not found: src/lib.rs::missing
+```
+
+## Related Commands
+
+<CardGroup cols={2}>
+  <Card title="workspace" icon="code-branch" href="/cli/workspace">
+    Manage shadow transactions
+  </Card>
+  <Card title="read" icon="book" href="/cli/read">
+    Read symbol before editing
+  </Card>
+  <Card title="search" icon="magnifying-glass" href="/cli/search">
+    Find symbols to edit
+  </Card>
+  <Card title="run" icon="play" href="/cli/run">
+    Execute .curd scripts with edits
+  </Card>
+</CardGroup>

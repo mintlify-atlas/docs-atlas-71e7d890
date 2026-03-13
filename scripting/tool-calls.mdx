@@ -1,0 +1,599 @@
+---
+title: 'Tool Calls'
+description: 'Calling CURD tools from scripts with parameter binding'
+---
+
+## Tool Call Syntax
+
+CURD scripts invoke tools using a simple call syntax:
+
+```curd
+tool_name arg1=value1 arg2=value2
+```
+
+### Named Arguments (Recommended)
+
+```curd
+edit uri="src/lib.rs::alpha" action="upsert" code=$patch
+verify_impact strict=true
+search query="AuthToken" fuzzy=false
+```
+
+### Positional Arguments (Limited)
+
+Some tools support a single positional argument as syntactic sugar:
+
+```curd
+search "AuthToken"
+read "src/lib.rs::alpha"
+shell "cargo build"
+```
+
+These expand to:
+
+```curd
+search query="AuthToken"
+read uris=["src/lib.rs::alpha"]
+shell command="cargo build"
+```
+
+<Warning>
+  Mixing named and positional arguments is not allowed. Choose one style per tool call.
+</Warning>
+
+## Parameter Binding
+
+Tool parameters can use:
+- Literal values
+- Variable interpolation (`$variable`)
+- Complex data structures
+
+### Literal Values
+
+```curd
+edit uri="src/lib.rs::alpha" action="upsert"
+verify_impact strict=true
+search query="token validation"
+```
+
+### Variable Interpolation
+
+```curd
+arg target_uri: string
+let patch = "pub fn alpha() {}"
+let strict = true
+
+edit uri=$target_uri code=$patch action="upsert"
+verify_impact strict=$strict
+```
+
+### Array Arguments
+
+```curd
+let files = ["src/main.rs", "src/lib.rs", "src/auth.rs"]
+read uris=$files
+```
+
+### Object Arguments
+
+```curd
+let config = {
+  strict: true,
+  depth: 2
+}
+
+verify_impact strict=true
+```
+
+## Available Tools
+
+### Search Tools
+
+#### search
+
+Symbol-aware search:
+
+```curd
+search query="AuthToken"
+search query="validate" fuzzy=true
+```
+
+Parameters:
+- `query` (string, required) - Search term
+- `fuzzy` (bool, optional) - Enable fuzzy matching
+- `limit` (number, optional) - Max results
+
+### Read Tools
+
+#### read
+
+Read source code:
+
+```curd
+read uris=["src/lib.rs::alpha"]
+read uris=["src/auth.rs::validate", "src/session.rs::create"]
+```
+
+Positional shorthand:
+
+```curd
+read "src/lib.rs::alpha"
+```
+
+Parameters:
+- `uris` (array, required) - List of URIs to read
+- `context` (string, optional) - Additional context
+
+### Graph Tools
+
+#### graph
+
+Dependency and call graph traversal:
+
+```curd
+graph uri="src/lib.rs::alpha" direction="both" depth=2
+graph uri="src/auth.rs::validate" direction="callers" depth=1
+```
+
+Positional shorthand:
+
+```curd
+graph "src/lib.rs::alpha"
+```
+
+Parameters:
+- `uri` or `uris` (string/array, required) - Target URI(s)
+- `direction` (string, optional) - "callers", "callees", or "both"
+- `depth` (number, optional) - Traversal depth
+
+### Mutation Tools
+
+#### edit
+
+Modify source code:
+
+```curd
+edit uri="src/lib.rs::alpha" 
+     action="upsert" 
+     code=$patch
+```
+
+Parameters:
+- `uri` (string, required) - Target URI
+- `code` (string, required) - New code
+- `action` (string, required) - "upsert", "replace", or "insert"
+- `adaptation_justification` (string, optional) - Why this change
+
+<Note>
+  `edit` requires an active workspace session. Always wrap in `atomic` blocks.
+</Note>
+
+### Verification Tools
+
+#### verify_impact
+
+Verify change safety:
+
+```curd
+verify_impact strict=true
+verify_impact strict=false
+```
+
+Parameters:
+- `strict` (bool, optional) - Strict verification mode
+
+### Shell Tools
+
+#### shell
+
+Execute shell commands:
+
+```curd
+shell command="cargo build"
+shell command="npm test"
+```
+
+Positional shorthand:
+
+```curd
+shell "cargo build"
+```
+
+Parameters:
+- `command` (string, required) - Shell command to execute
+- `cwd` (string, optional) - Working directory
+
+<Warning>
+  Shell commands are governed by profile policies and require active workspace sessions.
+</Warning>
+
+## Tool Call Examples
+
+### Example 1: Search and Read
+
+```curd
+# Find authentication symbols
+search query="Auth"
+
+# Read specific symbols
+read uris=[
+  "src/auth.rs::validate",
+  "src/auth.rs::authenticate",
+  "src/auth.rs::authorize"
+]
+```
+
+### Example 2: Graph Analysis
+
+```curd
+arg target_uri: string
+
+# Check what calls this function
+graph uri=$target_uri direction="callers" depth=1
+
+# Check what this function calls
+graph uri=$target_uri direction="callees" depth=2
+
+# Check entire dependency neighborhood
+graph uri=$target_uri direction="both" depth=2
+```
+
+### Example 3: Safe Edit with Verification
+
+```curd
+use session required
+
+arg target_uri: string
+
+let patch = """
+pub fn validate(token: &str) -> bool {
+    if token.is_empty() {
+        return false;
+    }
+    verify_token_signature(token)
+}
+"""
+
+sequence {
+  # Read current implementation
+  read $target_uri
+  
+  # Check dependencies
+  graph uri=$target_uri direction="both" depth=2
+  
+  # Apply changes atomically
+  atomic apply {
+    edit uri=$target_uri action="upsert" code=$patch
+    verify_impact strict=true
+  }
+}
+```
+
+### Example 4: Multi-Target Updates
+
+```curd
+use session required
+
+arg targets: array
+
+let header = """
+// Updated: security compliance
+"""
+
+sequence update_all {
+  # Read all targets first
+  read uris=$targets
+  
+  # Update each (in practice, would need iteration)
+  atomic {
+    edit uri="src/auth.rs::validate" code=$header action="insert"
+    edit uri="src/session.rs::create" code=$header action="insert"
+    verify_impact strict=true
+  }
+}
+```
+
+### Example 5: Build and Test
+
+```curd
+use session required
+
+arg target_uri: string
+let code = "..."
+
+sequence safe_update {
+  atomic apply {
+    edit uri=$target_uri code=$code action="upsert"
+    verify_impact strict=true
+  }
+  
+  # Run tests after edit
+  shell "cargo test"
+  shell "cargo clippy"
+}
+```
+
+## Tools Requiring Sessions
+
+These tools require an active workspace session:
+
+- `edit` - Modifies source files
+- `mutate` - Advanced mutations
+- `manage_file` - File operations
+- `shell` - Shell commands (when destructive)
+- `build` - Build commands
+
+Always use:
+
+```curd
+use session required
+```
+
+And execute with:
+
+```bash
+curd workspace begin
+curd run script.curd
+curd workspace commit
+```
+
+## Parameter Types
+
+### String Parameters
+
+```curd
+edit uri="src/lib.rs::alpha" action="upsert"
+search query="token"
+```
+
+### Boolean Parameters
+
+```curd
+verify_impact strict=true
+search fuzzy=false
+```
+
+### Number Parameters
+
+```curd
+graph uri=$target depth=2
+search limit=50
+```
+
+### Array Parameters
+
+```curd
+read uris=["src/main.rs", "src/lib.rs"]
+```
+
+### Object Parameters
+
+```curd
+let config = { strict: true, depth: 2 }
+# Pass to tools that accept objects
+```
+
+## Error Handling
+
+Tool calls can fail for various reasons:
+
+### Invalid Parameters
+
+```curd
+# Error: missing required parameter
+edit action="upsert"  # Missing uri and code
+```
+
+### Type Mismatches
+
+```curd
+# Error: depth must be a number
+graph uri=$target depth="not-a-number"
+```
+
+### Session Requirements
+
+```curd
+# Error: edit requires active session
+edit uri=$target code=$patch  # No workspace session
+```
+
+Use `curd run check` to validate before execution:
+
+```bash
+curd run check script.curd
+```
+
+## Tool Call Compilation
+
+When compiled to plan artifacts, tool calls become plan nodes:
+
+### Script
+
+```curd
+edit uri=$target_uri code=$patch action="upsert"
+verify_impact strict=true
+```
+
+### Compiled Plan
+
+```json
+{
+  "nodes": [
+    {
+      "id": "uuid-1",
+      "op": {
+        "tool": "edit",
+        "args": {
+          "uri": "src/lib.rs::alpha",
+          "code": "pub fn alpha() {}",
+          "action": "upsert"
+        }
+      },
+      "dependencies": [],
+      "output_limit": 65536,
+      "retry_limit": 0
+    },
+    {
+      "id": "uuid-2",
+      "op": {
+        "tool": "verify_impact",
+        "args": {
+          "strict": true
+        }
+      },
+      "dependencies": ["uuid-1"],
+      "output_limit": 65536,
+      "retry_limit": 0
+    }
+  ]
+}
+```
+
+## Best Practices
+
+<AccordionGroup>
+  <Accordion title="Use Named Arguments">
+    Named arguments are more readable and maintainable:
+    ```curd
+    # Good: explicit and clear
+    graph uri=$target direction="both" depth=2
+    
+    # Less clear: what does the 2 mean?
+    graph $target both 2
+    ```
+  </Accordion>
+  
+  <Accordion title="Store Complex Code in Variables">
+    Use variables for multiline code:
+    ```curd
+    let patch = """
+    pub fn validate() {
+        // Complex implementation
+    }
+    """
+    
+    edit uri=$target code=$patch action="upsert"
+    ```
+  </Accordion>
+  
+  <Accordion title="Verify After Edit">
+    Always verify changes:
+    ```curd
+    atomic {
+      edit uri=$target code=$patch action="upsert"
+      verify_impact strict=true
+    }
+    ```
+  </Accordion>
+  
+  <Accordion title="Read Before Edit">
+    Understand context before making changes:
+    ```curd
+    read $target
+    graph uri=$target depth=2
+    
+    atomic {
+      edit uri=$target code=$patch
+      verify_impact strict=true
+    }
+    ```
+  </Accordion>
+</AccordionGroup>
+
+## Complete Workflow Example
+
+```curd
+# explain: fix authentication vulnerability in token validation
+# why: current implementation doesn't verify token signatures
+# risk: auth module is critical security boundary
+# review: security team review required before production
+# tag: security, authentication
+
+use profile supervised
+use session required
+
+arg target_uri: string = "src/auth.rs::validate"
+arg strict_verification: bool = true
+
+let security_patch = """
+pub fn validate(token: &str) -> Result<bool, AuthError> {
+    if token.is_empty() {
+        return Err(AuthError::EmptyToken);
+    }
+    
+    // Verify signature
+    if !verify_signature(token) {
+        return Err(AuthError::InvalidSignature);
+    }
+    
+    // Check expiration
+    if is_expired(token) {
+        return Err(AuthError::Expired);
+    }
+    
+    Ok(true)
+}
+"""
+
+sequence analysis {
+  # Search for related symbols
+  search query="auth token"
+  
+  # Read current implementation
+  read $target_uri
+  
+  # Check what depends on this
+  graph uri=$target_uri direction="callers" depth=2
+  
+  # Check what this depends on
+  graph uri=$target_uri direction="callees" depth=1
+}
+
+sequence apply_fix {
+  atomic security_update {
+    edit uri=$target_uri 
+         code=$security_patch 
+         action="upsert"
+    verify_impact strict=$strict_verification
+  }
+}
+
+sequence verify {
+  # Re-read to confirm changes
+  read $target_uri
+  
+  # Run tests
+  shell "cargo test auth::validate"
+  shell "cargo clippy --all-targets"
+}
+```
+
+Execute:
+
+```bash
+# Check the script
+curd run check security_fix.curd
+
+# Compile with arguments
+curd run compile security_fix.curd \
+  --target-uri "src/auth.rs::validate" \
+  --strict-verification true
+
+# Execute in session
+curd workspace begin
+curd run security_fix.curd
+curd workspace diff
+curd workspace commit
+```
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Examples" icon="book" href="/scripting/examples">
+    Real-world workflow examples
+  </Card>
+  <Card title="Best Practices" icon="stars" href="/scripting/best-practices">
+    Explainability, safety, and governance patterns
+  </Card>
+</CardGroup>

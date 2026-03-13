@@ -1,0 +1,494 @@
+---
+title: 'Shadow Workspace'
+description: 'Transaction model with shadow store, begin/commit/rollback operations, and conflict resolution'
+---
+
+CURD's shadow workspace provides transactional safety for code mutations. All changes are staged in an isolated shadow directory before being committed atomically to the real workspace.
+
+## Transaction Model
+
+The shadow workspace implements a **copy-on-write** transaction model with three core operations:
+
+<Steps>
+
+### Begin Transaction
+
+Clone the workspace to `.curd/shadow/<uuid>/` (uses copy-on-write for performance)
+
+### Stage Changes
+
+All mutations (edits, shell commands) execute against the shadow workspace
+
+### Commit or Rollback
+
+Either write changes back atomically or discard the shadow entirely
+
+</Steps>
+
+## ShadowStore Architecture
+
+```rust
+// curd-core/src/transaction.rs:32
+pub struct ShadowStore {
+    pub workspace_root: PathBuf,
+    pub shadow_root: Option<PathBuf>,  // Active shadow directory
+    active: bool,
+    staged_files: HashSet<PathBuf>,     // Explicitly staged paths
+    base_hashes: HashMap<PathBuf, String>,  // SHA-256 at begin()
+    shadow_meta: HashMap<PathBuf, ShadowFileMeta>,  // Metadata snapshot
+    savepoints: Vec<Savepoint>,         // Nested transaction stack
+}
+```
+
+### Transaction State Persistence
+
+Active transactions survive process restarts via `.curd/shadow/HEAD`:
+
+```rust
+// curd-core/src/transaction.rs:16
+pub struct TransactionState {
+    pub active_uuid: String,
+    pub staged_files: Vec<PathBuf>,
+    pub base_hashes: HashMap<PathBuf, String>,
+    pub shadow_meta: HashMap<PathBuf, ShadowFileMeta>,
+}
+```
+
+<Note>
+If CURD detects an interrupted transaction on startup, it automatically recovers the shadow workspace state.
+</Note>
+
+## Core Operations
+
+### Begin Transaction
+
+```bash
+curd workspace begin
+```
+
+**Implementation** (curd-core/src/transaction.rs:128):
+
+```rust
+pub fn begin(&mut self) -> Result<()> {
+    // 1. Check for existing lock
+    if !self.active && crate::workspace::is_workspace_locked(&self.workspace_root) {
+        anyhow::bail!("Workspace is locked by another active transaction.");
+    }
+
+    // 2. Generate shadow directory
+    let shadow_dir = self.workspace_root
+        .join(".curd")
+        .join("shadow")
+        .join(format!("curd_shadow_{}", Uuid::new_v4()));
+
+    // 3. Clone workspace (CoW + hash capture)
+    let (base_hashes, shadow_meta) = self.clone_workspace_to_shadow(&shadow_dir)?;
+    
+    self.shadow_root = Some(shadow_dir);
+    self.active = true;
+    self.write_head()?;
+    Ok(())
+}
+```
+
+<Warning>
+Only one transaction can be active per workspace. Attempting to begin a second transaction returns a lock error.
+</Warning>
+
+### Clone Workspace Implementation
+
+The `clone_workspace_to_shadow` method performs efficient workspace duplication:
+
+```rust
+// curd-core/src/transaction.rs:173
+fn clone_workspace_to_shadow(
+    &self,
+    shadow_dir: &Path,
+) -> Result<(HashMap<PathBuf, String>, HashMap<PathBuf, ShadowFileMeta>)> {
+    let mut base_hashes = HashMap::new();
+    let mut shadow_meta = HashMap::new();
+    
+    // Use WalkBuilder to respect .gitignore
+    let mut builder = WalkBuilder::new(&self.workspace_root);
+    builder.hidden(false).ignore(true).git_ignore(true);
+    
+    // Exclude .git, .curd, target, node_modules, etc.
+    builder.filter_entry(move |entry| {
+        let path = entry.path();
+        if path.is_dir() && is_excluded(path) {
+            return false;
+        }
+        true
+    });
+
+    for entry in builder.build() {
+        if source_path.is_file() {
+            // Copy file (CoW on supported filesystems)
+            fs::copy(source_path, &dest_path)?;
+            
+            // Capture SHA-256 for conflict detection
+            let bytes = fs::read(source_path)?;
+            let hash = sha256_hash(&bytes);
+            base_hashes.insert(rel_path.to_path_buf(), hash);
+            
+            // Capture metadata (size, mtime)
+            let meta = fs::metadata(&dest_path)?;
+            shadow_meta.insert(rel_path.to_path_buf(), ShadowFileMeta {
+                size: meta.len(),
+                mtime_secs: mtime_to_secs(meta.modified()?),
+            });
+        }
+    }
+    
+    Ok((base_hashes, shadow_meta))
+}
+```
+
+### Stage Changes
+
+```rust
+// curd-core/src/transaction.rs:272
+pub fn stage(&mut self, path: &Path, new_content: &str) -> Result<()> {
+    if !self.active {
+        anyhow::bail!("No active transaction. Call workspace(action: 'begin') first.");
+    }
+
+    let shadow_root = self.shadow_root.as_ref()
+        .ok_or_else(|| anyhow::anyhow!("No active shadow root"))?;
+    
+    // Convert to relative path and validate within workspace
+    let rel_path = path.strip_prefix(&self.workspace_root)
+        .map_err(|_| anyhow::anyhow!("Refusing to stage path outside workspace root"))?;
+
+    let dest_path = shadow_root.join(rel_path);
+    fs::write(&dest_path, new_content)?;
+    
+    self.staged_files.insert(rel_path.to_path_buf());
+    self.write_head()?;  // Persist state
+
+    Ok(())
+}
+```
+
+**Key Safety Features**:
+- Validates paths are within workspace root
+- Refuses to stage paths outside the sandbox
+- Persists staged files to `.curd/shadow/HEAD`
+
+### Implicit Change Discovery
+
+Changes made by shell tools (not via `edit`) are automatically detected:
+
+```rust
+// curd-core/src/transaction.rs:579
+fn discover_implicit_changes(&mut self) {
+    // Walk shadow workspace
+    for entry in WalkBuilder::new(shadow_root) {
+        if self.staged_files.contains(rel_path) {
+            continue;  // Already explicitly staged
+        }
+        
+        // Compare hash to detect modification
+        let current_hash = sha256_hash(&fs::read(shadow_path)?);
+        if let Some(base_hash) = self.base_hashes.get(rel_path) {
+            if *base_hash != current_hash {
+                // Implicitly modified!
+                self.staged_files.insert(rel_path.to_path_buf());
+            }
+        }
+    }
+}
+```
+
+<Info>
+This ensures that changes from `cargo build`, `npm run format`, or any shell command are captured even if not explicitly staged.
+</Info>
+
+### Diff Staged Changes
+
+```bash
+curd workspace diff
+```
+
+**Output** (unified diff format):
+
+```diff
+--- a/src/auth.rs
++++ b/src/auth.rs
+-pub fn validate(token: &str) -> bool {
+-    token.len() > 0
++pub fn validate(token: &str) -> Result<bool> {
++    Ok(!token.is_empty())
+ }
+```
+
+Implementation:
+
+```rust
+// curd-core/src/transaction.rs:345
+pub fn diff(&mut self) -> String {
+    self.discover_implicit_changes();  // Find shell-modified files
+    
+    let mut out = String::new();
+    for rel_path in self.staged_files.iter().sorted() {
+        let orig_path = self.workspace_root.join(rel_path);
+        let shadow_path = shadow_root.join(rel_path);
+
+        let original = fs::read_to_string(&orig_path).unwrap_or_default();
+        let staged = fs::read_to_string(&shadow_path).unwrap_or_default();
+
+        out.push_str(&format!("--- a/{}\n+++ b/{}\n", rel_path.display(), rel_path.display()));
+        out.push_str(&unified_diff(&original, &staged));
+    }
+    out
+}
+```
+
+### Commit Transaction
+
+```bash
+curd workspace commit
+```
+
+**Atomic Commit Flow** (curd-core/src/transaction.rs:404):
+
+<Steps>
+
+### Step 1: Discover Implicit Changes
+
+Scan shadow workspace for files modified by shell commands
+
+### Step 2: Conflict Detection
+
+Compare current workspace file hashes to base hashes captured at `begin()`
+
+### Step 3: Three-Way Merge (if conflicts)
+
+Use `git merge-file` to merge human changes with AI changes
+
+### Step 4: Prepare Plan
+
+Stage all writes in a temporary plan directory
+
+### Step 5: Atomic Writeback
+
+Only if all files prepare successfully, copy from plan to real workspace
+
+### Step 6: Cleanup
+
+Remove shadow workspace and clear transaction state
+
+</Steps>
+
+```rust
+pub fn commit(&mut self) -> Result<Vec<PathBuf>> {
+    self.discover_implicit_changes();
+
+    let plan_dir = tempfile::Builder::new()
+        .prefix("curd_commit_plan_")
+        .tempdir_in(self.workspace_root.join(".curd/tmp"))?;
+    
+    let mut plan_files = Vec::new();
+
+    // 1. DETECT CONFLICTS
+    for rel_path in &self.staged_files {
+        let orig_path = self.workspace_root.join(rel_path);
+        let shadow_path = shadow_root.join(rel_path);
+
+        // Metadata prefilter (fast path)
+        let base_meta = self.shadow_meta.get(rel_path);
+        let current_meta = file_metadata(&orig_path);
+        
+        let conflict = if base_meta == current_meta {
+            false  // Unchanged since begin(), no conflict
+        } else {
+            // Hash-based conflict check
+            let current_hash = sha256_hash(&fs::read(&orig_path)?);
+            current_hash != self.base_hashes[rel_path]
+        };
+
+        // 2. HANDLE CONFLICT (three-way merge)
+        if conflict {
+            let base_file = get_git_head_version(rel_path)?;  // or empty
+            let planned_path = plan_dir.path().join(rel_path);
+            fs::copy(&orig_path, &planned_path)?;  // Current workspace
+
+            let status = Command::new("git")
+                .args([
+                    "merge-file",
+                    "-L", "Real Workspace (Human)",
+                    "-L", "Base (Pre-Transaction)",
+                    "-L", "Shadow Workspace (AI)",
+                    "--",
+                    &planned_path.to_string_lossy(),
+                    &base_file.to_string_lossy(),
+                    &shadow_path.to_string_lossy(),
+                ])
+                .status()?;
+
+            if !status.success() {
+                anyhow::bail!("Merge conflict in {}. Commit aborted.", rel_path.display());
+            }
+            
+            plan_files.push((rel_path.clone(), planned_path));
+        } else {
+            // No conflict: copy shadow to plan
+            let planned_path = plan_dir.path().join(rel_path);
+            fs::copy(&shadow_path, &planned_path)?;
+            plan_files.push((rel_path.clone(), planned_path));
+        }
+    }
+
+    // 3. ATOMIC WRITEBACK (only after all files prepared successfully)
+    for (rel_path, planned_path) in plan_files {
+        let orig_path = self.workspace_root.join(&rel_path);
+        fs::copy(planned_path, &orig_path)?;
+    }
+
+    // 4. CLEANUP
+    self.cleanup_shadow();
+    self.active = false;
+    fs::remove_file(self.head_path())?;
+
+    Ok(written_files)
+}
+```
+
+<Warning>
+If **any** file fails to merge or prepare, the entire commit is aborted. No partial writes occur.
+</Warning>
+
+### Rollback Transaction
+
+```bash
+curd workspace rollback
+```
+
+```rust
+// curd-core/src/transaction.rs:680
+pub fn rollback(&mut self) {
+    if !self.active {
+        return;
+    }
+
+    // Remove shadow workspace
+    self.cleanup_shadow();
+    
+    // Clear state
+    self.active = false;
+    self.staged_files.clear();
+    self.shadow_meta.clear();
+    fs::remove_file(self.head_path()).ok();
+}
+```
+
+**Rollback is always safe**: The real workspace is never modified, so discarding the shadow has no side effects.
+
+## Nested Transactions (Savepoints)
+
+CURD supports nested `atomic` blocks via savepoints:
+
+```rust
+// curd-core/src/transaction.rs:136
+if self.active {
+    // Nested begin: push savepoint
+    self.savepoints.push(Savepoint {
+        staged_files: self.staged_files.clone(),
+        base_hashes: self.base_hashes.clone(),
+    });
+    return Ok(());
+}
+```
+
+**Usage** (in `.curd` scripts):
+
+```curd
+atomic {
+  edit uri="src/lib.rs::alpha" action="upsert" code="..."
+  
+  atomic {
+    # Nested transaction
+    edit uri="src/lib.rs::beta" action="upsert" code="..."
+  }
+}
+```
+
+Rollback of inner `atomic` restores state to outer savepoint.
+
+## Conflict Resolution
+
+### When Conflicts Occur
+
+Conflicts arise when:
+1. File was modified in **real workspace** after `begin()`
+2. File is also modified in **shadow workspace**
+
+### Three-Way Merge Strategy
+
+CURD uses `git merge-file` with three inputs:
+
+- **Ours**: Real workspace (human edits)
+- **Base**: Workspace state at `begin()` (from git or empty)
+- **Theirs**: Shadow workspace (AI edits)
+
+```bash
+git merge-file \
+  -L "Real Workspace (Human)" \
+  -L "Base (Pre-Transaction)" \
+  -L "Shadow Workspace (AI)" \
+  -- current_file base_file shadow_file
+```
+
+<Info>
+If merge succeeds (exit code 0), the merged result is committed. If merge fails (conflict markers), commit is aborted.
+</Info>
+
+## Transaction Boundaries
+
+### Session Requirement Policy
+
+From AGENTS.md and policy.rs:306:
+
+```rust
+if profile.session_required_for_change
+    && matches!(op, CanonicalOperationKind::Change | CanonicalOperationKind::Exec)
+    && !input.session_open
+{
+    return PolicyDecision::Deny(
+        "SESSION_REQUIRED: profile requires an open session for change/exec operations."
+    );
+}
+```
+
+**Tools requiring active session**:
+- `edit`
+- `manage_file`
+- `mutate`
+- `shell` (when mutating)
+- `build` (when mutating)
+- `execute_plan`
+- `execute_dsl`
+
+<Warning>
+Attempting to call mutation tools without an active session returns a barrier error.
+</Warning>
+
+## Configuration
+
+```toml
+[workspace]
+shadow_dir = ".curd/shadow"  # Shadow workspace location
+auto_discover_implicit = true  # Scan for shell-modified files
+conflict_strategy = "merge"   # "merge", "abort", "overwrite"
+```
+
+## Related Concepts
+
+<CardGroup cols={2}>
+  <Card title="Code Intelligence" icon="magnifying-glass" href="/core-concepts/code-intelligence">
+    Search and graph engines
+  </Card>
+  <Card title="Scripts & Plans" icon="file-code" href="/core-concepts/scripts-and-plans">
+    Authoring workflows with .curd scripts
+  </Card>
+</CardGroup>

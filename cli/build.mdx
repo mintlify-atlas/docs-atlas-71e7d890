@@ -1,0 +1,523 @@
+---
+title: curd build
+description: Adapter-based build system with dry-run, execute modes, and custom adapters
+---
+
+## Overview
+
+The `curd build` command provides an adapter-based build control plane that routes standard build commands (cargo, npm, make, etc.) through CURD's unified interface with execution tracking, sandboxing, and policy enforcement.
+
+```bash
+curd build [target] [directory] [options]
+```
+
+Aliases: `curd b`, `curd bld`
+
+## Usage
+
+```bash
+# Auto-detect and build
+curd build
+
+# Build with specific adapter
+curd build --adapter cargo
+
+# Build with profile
+curd build --profile release
+
+# Build specific target
+curd build test
+
+# Build in specific directory
+curd build . /path/to/project
+
+# Dry-run (show plan without executing)
+curd build --plan
+
+# Custom command
+curd build --command "./my-build-script.sh"
+```
+
+## Arguments
+
+<ParamField path="target_or_dir" type="string">
+  Either:
+  - Build target/task (e.g., `test`, `dev`, `prod`)
+  - Directory path (if it's a directory)
+  
+  If omitted, builds default target in current directory.
+</ParamField>
+
+<ParamField path="dir" type="PathBuf">
+  Workspace root directory.
+  
+  Only used when first argument is a target (not a directory).
+</ParamField>
+
+## Options
+
+### Adapter Selection
+
+<ParamField path="--adapter" type="string">
+  Build adapter override.
+  
+  Built-in adapters:
+  - `cargo` - Rust (Cargo)
+  - `cmake`, `ninja`, `make` - C/C++
+  - `npm`, `yarn`, `pnpm`, `bun` - JavaScript/TypeScript
+  - `uv`, `poetry`, `pip`, `conda`, `mamba` - Python
+  - `go` - Go modules
+  - `gradle`, `maven` - Java
+  - `bazel`, `meson`, `buck2` - Large builds
+  - `pixi`, `mise` - Environment managers
+  
+  Custom adapters defined in `.curd/settings.toml`.
+</ParamField>
+
+### Build Configuration
+
+<ParamField path="--profile" type="string">
+  Build profile: `debug` or `release`.
+  
+  Maps to adapter-specific profiles:
+  - Cargo: `--release`
+  - npm: `--production`
+  - etc.
+</ParamField>
+
+<ParamField path="--execute" type="boolean" default="true">
+  Execute planned commands.
+  
+  Set to `false` to only show plan:
+  ```bash
+  curd build --execute=false
+  ```
+</ParamField>
+
+<ParamField path="--plan" type="boolean">
+  Only show build plan, do not execute.
+  
+  Alias for `--execute=false`.
+</ParamField>
+
+<ParamField path="--command" type="string">
+  Custom command to run directly, overriding adapters.
+  
+  Example:
+  ```bash
+  curd build --command "pixi run dev2"
+  ```
+</ParamField>
+
+<ParamField path="--allow-untrusted" type="boolean">
+  Allow execution of custom adapters without confirmation.
+  
+  Custom adapters defined in `.curd/settings.toml` require approval unless this flag is set.
+</ParamField>
+
+### Output Options
+
+<ParamField path="--json" type="boolean">
+  Output results as JSON instead of human-readable format.
+</ParamField>
+
+### Rust-Specific
+
+<ParamField path="--zig" type="boolean">
+  Use `cargo-zigbuild` instead of `cargo build`.
+  
+  Requires cargo-zigbuild installed.
+</ParamField>
+
+### Pass-Through Arguments
+
+<ParamField path="trailing_args" type="Vec<String>">
+  Arguments to pass directly to the underlying compiler/adapter.
+  
+  Specified after `--`:
+  ```bash
+  curd build -- --features experimental --verbose
+  ```
+</ParamField>
+
+## Built-In Adapters
+
+### Rust (Cargo)
+
+```bash
+# Auto-detected from Cargo.toml
+curd build
+
+# Explicit
+curd build --adapter cargo --profile release
+
+# With features
+curd build --adapter cargo -- --features "full tokio"
+
+# Using zigbuild
+curd build --adapter cargo --zig
+```
+
+### JavaScript/TypeScript
+
+```bash
+# npm
+curd build --adapter npm
+curd build --adapter npm test
+
+# yarn
+curd build --adapter yarn --profile production
+
+# pnpm
+curd build --adapter pnpm build
+
+# bun
+curd build --adapter bun test
+```
+
+### Python
+
+```bash
+# uv
+curd build --adapter uv
+
+# poetry
+curd build --adapter poetry install
+
+# pip
+curd build --adapter pip -- install -r requirements.txt
+```
+
+### C/C++
+
+```bash
+# make
+curd build --adapter make
+curd build --adapter make clean
+
+# cmake
+curd build --adapter cmake
+
+# ninja
+curd build --adapter ninja
+```
+
+### Go
+
+```bash
+curd build --adapter go
+curd build --adapter go test
+```
+
+### Java
+
+```bash
+# gradle
+curd build --adapter gradle
+curd build --adapter gradle test
+
+# maven
+curd build --adapter maven package
+```
+
+## Custom Adapters
+
+Define in `.curd/settings.toml`:
+
+```toml
+[build.adapters.my_custom]
+detect_files = ["my-build.toml"]
+commands.default = ["my-builder", "build"]
+commands.test = ["my-builder", "test"]
+commands.clean = ["my-builder", "clean"]
+trusted = false  # Requires approval
+```
+
+Usage:
+```bash
+curd build --adapter my_custom
+
+# First time requires confirmation
+⚠️  UNTRUSTED BUILD ADAPTER DETECTED
+The adapter 'my_custom' is defined in local .curd/settings.toml.
+Executing may run arbitrary commands.
+
+Continue? (y/N)
+
+# Skip confirmation
+curd build --adapter my_custom --allow-untrusted
+```
+
+## Build Response
+
+### Human-Readable
+
+```bash
+$ curd build --adapter cargo
+
+--- CURD BUILD EXECUTION ---
+  Adapter:   cargo
+  Profile:   debug
+  Steps:     2
+    [1] cargo build
+         Result: SUCCESS
+    [2] cargo test
+         Result: SUCCESS
+
+✔ Build process completed successfully.
+```
+
+### JSON
+
+```bash
+$ curd build --adapter cargo --json
+
+{
+  "adapter": "cargo",
+  "profile": "debug",
+  "target": null,
+  "status": "ok",
+  "steps": [
+    {
+      "command": ["cargo", "build"],
+      "success": true,
+      "stdout": "   Compiling my-project v0.1.0\n...",
+      "stderr": "",
+      "exit_code": 0
+    }
+  ],
+  "untrusted_confirmation_required": false
+}
+```
+
+## Dry-Run Mode
+
+Show build plan without executing:
+
+```bash
+curd build --plan
+
+--- CURD BUILD PLAN ---
+  Adapter:   cargo
+  Profile:   debug
+  Steps:     2
+    [1] cargo build
+    [2] cargo test
+```
+
+Use for:
+- Verifying adapter detection
+- Previewing commands before execution
+- CI/CD validation
+
+## Shell Hooks
+
+Route standard build commands through CURD:
+
+```bash
+# Generate hook for your shell
+curd hook zsh > ~/.zshrc.d/curd-hook.zsh
+curd hook bash >> ~/.bashrc
+curd hook fish > ~/.config/fish/conf.d/curd-hook.fish
+```
+
+After sourcing, these commands automatically use CURD:
+```bash
+# These are intercepted when .curd/ exists
+make
+cargo build
+npm test
+```
+
+Hook behavior:
+- Only intercepts in directories with `.curd/`
+- Passes through if no `.curd/` found
+- Intercepts specific subcommands (build, test, etc.)
+- Skips utility commands (clean, help)
+
+## Policy Enforcement
+
+Build commands respect workspace policy:
+
+```toml
+# .curd/settings.toml
+[policy.exec]
+allow_background = false
+timeout_ms = 300000  # 5 minutes
+workspace_bound_cwd = true
+
+[policy.blocklist]
+paths = ["secrets/**", ".env"]
+commands = ["rm -rf /"]
+```
+
+Violations:
+```bash
+$ curd build --command "rm -rf /"
+Error: POLICY_DENIED: Command blocked by policy
+```
+
+## Sandboxing
+
+Build execution can be sandboxed:
+
+```toml
+[build]
+sandbox = true
+sandbox_mode = "bwrap"  # or "docker", "macos"
+```
+
+Sandbox isolates:
+- Filesystem access
+- Network access
+- Process execution
+
+See [advanced control plane documentation](/advanced/control-plane) for security details.
+
+## Examples
+
+### Auto-Detect and Build
+
+```bash
+cd my-rust-project
+curd build
+# Detects Cargo.toml, runs cargo build
+```
+
+### Build with Custom Target
+
+```bash
+curd build test
+# Runs: cargo test
+
+curd build bench
+# Runs: cargo bench
+```
+
+### Production Build
+
+```bash
+curd build --profile release
+# Runs: cargo build --release
+```
+
+### Multiple Adapters (Monorepo)
+
+```bash
+# Rust backend
+curd build --adapter cargo backend/
+
+# Node frontend
+curd build --adapter npm frontend/
+```
+
+### Custom Build Script
+
+```bash
+curd build --command "./scripts/build-all.sh"
+```
+
+### Pass Flags to Compiler
+
+```bash
+curd build -- --features "full" --verbose
+# Runs: cargo build --features "full" --verbose
+```
+
+## Troubleshooting
+
+### Adapter Not Detected
+
+```bash
+$ curd build
+Error: No build adapter detected
+```
+
+Solutions:
+1. Specify explicitly:
+   ```bash
+   curd build --adapter cargo
+   ```
+
+2. Configure in settings:
+   ```toml
+   [build]
+   adapter = "cargo"
+   ```
+
+3. Use custom command:
+   ```bash
+   curd build --command "./build.sh"
+   ```
+
+### Untrusted Adapter Blocked
+
+```bash
+$ curd build --adapter my_custom
+
+⚠️  UNTRUSTED BUILD ADAPTER
+Continue? (y/N) n
+Aborted.
+```
+
+Solutions:
+1. Approve interactively: answer `y`
+2. Skip prompt: `--allow-untrusted`
+3. Mark as trusted in settings:
+   ```toml
+   [build.adapters.my_custom]
+   trusted = true
+   ```
+
+### Build Timeout
+
+```bash
+Error: Build exceeded timeout (300000ms)
+```
+
+Increase timeout:
+```toml
+[policy.exec]
+timeout_ms = 600000  # 10 minutes
+```
+
+## Integration with CI/CD
+
+### GitHub Actions
+
+```yaml
+steps:
+  - name: CURD Build
+    run: |
+      curd init
+      curd build --profile release
+```
+
+### GitLab CI
+
+```yaml
+build:
+  script:
+    - curd init
+    - curd build --json > build-output.json
+  artifacts:
+    paths:
+      - build-output.json
+```
+
+## Related Commands
+
+<CardGroup cols={2}>
+  <Card title="init" icon="rocket" href="/cli/init">
+    Initialize to auto-detect adapter
+  </Card>
+  <Card title="doctor" icon="stethoscope" href="/cli/doctor">
+    Validate build system detection
+  </Card>
+  <Card title="run" icon="play" href="/cli/run">
+    Execute .curd scripts
+  </Card>
+  <Card title="settings" icon="gear" href="/cli/settings">
+    Configure build adapters
+  </Card>
+</CardGroup>

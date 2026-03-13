@@ -1,0 +1,432 @@
+---
+title: 'Variables and Arguments'
+description: 'Variable declaration, interpolation, and argument binding'
+---
+
+## Arguments
+
+Arguments make scripts reusable by accepting inputs at compile time. One source script can emit multiple concrete plan artifacts with different argument values.
+
+### Declaration Syntax
+
+```curd
+arg name: type
+arg name: type = default_value
+```
+
+### Required Arguments
+
+```curd
+arg target_uri: string
+arg max_depth: number
+```
+
+Must be provided when compiling:
+
+```bash
+curd run compile script.curd --target-uri "src/lib.rs::alpha" --max-depth 3
+```
+
+### Optional Arguments with Defaults
+
+```curd
+arg strict: bool = true
+arg direction: string = "both"
+arg files: array = ["src/main.rs"]
+```
+
+Can be overridden:
+
+```bash
+curd run compile script.curd --strict false
+```
+
+## Variable Types
+
+### String
+
+```curd
+arg target: string
+let message: string = "Hello"
+```
+
+### Boolean
+
+```curd
+arg enabled: bool = false
+let strict = true
+```
+
+### Number
+
+```curd
+arg depth: number = 2
+let count = 42
+let ratio = 3.14
+```
+
+### Array
+
+```curd
+arg files: array = ["src/main.rs", "src/lib.rs"]
+let numbers = [1, 2, 3, 4, 5]
+let mixed = ["string", 42, true]
+```
+
+### Object
+
+```curd
+arg config: object = { strict: true, depth: 2 }
+let settings = {
+  enabled: true,
+  timeout: 30,
+  retries: 3
+}
+```
+
+<Note>
+  Type annotations are optional for `let` declarations. The type is inferred from the value.
+</Note>
+
+## Variable Binding with let
+
+Variables bind values that can be referenced later in the script.
+
+### Basic Binding
+
+```curd
+let target = "src/auth.rs::validate"
+let strict = true
+let depth = 2
+```
+
+### Multiline String Binding
+
+Perfect for code patches:
+
+```curd
+let patch = """
+pub fn validate(token: &str) -> bool {
+    if token.is_empty() {
+        return false;
+    }
+    verify_signature(token)
+}
+"""
+```
+
+### Complex Data Structures
+
+```curd
+let config = {
+  search: {
+    max_results: 100,
+    fuzzy: true
+  },
+  edit: {
+    backup: true,
+    verify: true
+  }
+}
+
+let targets = [
+  "src/auth.rs::validate",
+  "src/session.rs::create",
+  "src/token.rs::verify"
+]
+```
+
+## Variable Interpolation
+
+Reference variables using the `$` prefix.
+
+### Basic Interpolation
+
+```curd
+let target = "src/lib.rs::alpha"
+read $target
+```
+
+Expands to:
+
+```curd
+read "src/lib.rs::alpha"
+```
+
+### In Tool Arguments
+
+```curd
+let uri = "src/auth.rs::validate"
+let patch = "pub fn validate() {}"
+let strict = true
+
+edit uri=$uri code=$patch action="upsert"
+verify_impact strict=$strict
+```
+
+### With Arguments
+
+```curd
+arg target_uri: string
+arg max_depth: number = 2
+
+read $target_uri
+graph uri=$target_uri depth=$max_depth direction="both"
+```
+
+### Interpolation Scope
+
+Variables are resolved in order:
+
+```curd
+arg base: string
+let target = $base  # Use argument value
+let patch = "..."
+
+edit uri=$target code=$patch  # Use variable value
+```
+
+## Argument Binding Flow
+
+When you compile a script, arguments are bound to values:
+
+<Steps>
+  <Step title="Parse Script">
+    CURD parses the `.curd` source and extracts argument declarations.
+  </Step>
+  <Step title="Resolve Arguments">
+    Values from command line override defaults:
+    ```bash
+    curd run compile fix.curd --target-uri "src/lib.rs::alpha"
+    ```
+  </Step>
+  <Step title="Create Bindings">
+    Arguments are bound to concrete values in the plan artifact.
+  </Step>
+  <Step title="Emit Artifact">
+    The compiled plan contains `arg_bindings` with all resolved values.
+  </Step>
+</Steps>
+
+## Multiple Plans from One Script
+
+Use arguments to create different execution plans:
+
+```curd
+arg target_uri: string
+arg strict: bool = true
+
+let patch = """
+pub fn process() {
+    // Updated logic
+}
+"""
+
+atomic {
+  edit uri=$target_uri code=$patch action="upsert"
+  verify_impact strict=$strict
+}
+```
+
+Compile for different targets:
+
+```bash
+# Plan 1: Fix auth module
+curd run compile fix.curd --target-uri "src/auth.rs::process"
+
+# Plan 2: Fix session module
+curd run compile fix.curd --target-uri "src/session.rs::process"
+
+# Plan 3: Fix with lenient verification
+curd run compile fix.curd \
+  --target-uri "src/token.rs::process" \
+  --strict false
+```
+
+Each compilation creates a unique plan artifact with different bound values.
+
+## Variable Scope
+
+Variables declared with `let` are available to all subsequent statements:
+
+```curd
+let target = "src/lib.rs::alpha"
+let patch = "pub fn alpha() {}"
+
+# Both variables available here
+edit uri=$target code=$patch
+
+sequence block {
+  # Variables available in blocks
+  read $target
+  verify_impact strict=true
+}
+
+# Still available after blocks
+graph uri=$target depth=2
+```
+
+<Note>
+  Variables cannot be reassigned. Each `let` declares a new binding.
+</Note>
+
+## Compile-Time Resolution
+
+All argument and variable resolution happens at compile time:
+
+```curd
+arg count: number = 5
+let doubled = 10  # Cannot do: $count * 2
+```
+
+<Warning>
+  There is no runtime evaluation of expressions. All values must be literals or variable references.
+</Warning>
+
+## Practical Examples
+
+### Example 1: Parameterized Refactor
+
+```curd
+# explain: standardize error handling across modules
+use profile supervised
+
+arg target_uri: string
+arg error_type: string = "AuthError"
+
+let error_impl = """
+pub enum {error_type} {
+    Invalid,
+    Expired,
+    Missing,
+}
+"""
+
+sequence refactor {
+  read $target_uri
+  graph uri=$target_uri direction="both" depth=1
+  
+  atomic apply {
+    edit uri=$target_uri code=$error_impl action="insert"
+    verify_impact strict=true
+  }
+}
+```
+
+Compile for different modules:
+
+```bash
+curd run compile refactor.curd \
+  --target-uri "src/auth.rs::errors" \
+  --error-type "AuthError"
+
+curd run compile refactor.curd \
+  --target-uri "src/session.rs::errors" \
+  --error-type "SessionError"
+```
+
+### Example 2: Batch Operations
+
+```curd
+# explain: apply consistent formatting
+arg files: array
+arg strict: bool = false
+
+let files_to_process = $files
+
+sequence format_all {
+  # Process would iterate if we had loops
+  # For now, this demonstrates the pattern
+  read $files_to_process
+  verify_impact strict=$strict
+}
+```
+
+### Example 3: Configuration-Driven Edits
+
+```curd
+arg target: string
+arg config: object = {
+  action: "upsert",
+  verify: true,
+  strict: true
+}
+
+let target_uri = $target
+let code = """
+pub fn updated() {
+    // New implementation
+}
+"""
+
+atomic {
+  edit uri=$target_uri code=$code action="upsert"
+  verify_impact strict=true
+}
+```
+
+## Argument Validation
+
+Type validation happens at compile time:
+
+```curd
+arg depth: number
+```
+
+```bash
+# Valid
+curd run compile script.curd --depth 3
+
+# Invalid (compile error)
+curd run compile script.curd --depth "not-a-number"
+```
+
+## Best Practices
+
+<AccordionGroup>
+  <Accordion title="Use Arguments for Reusability">
+    Make scripts work across multiple targets:
+    ```curd
+    arg target_uri: string
+    arg verify: bool = true
+    ```
+  </Accordion>
+  
+  <Accordion title="Provide Sensible Defaults">
+    Optional arguments with good defaults make scripts easier to use:
+    ```curd
+    arg max_depth: number = 2
+    arg direction: string = "both"
+    ```
+  </Accordion>
+  
+  <Accordion title="Use let for Code Templates">
+    Store multiline code patches in variables:
+    ```curd
+    let implementation = """
+    pub fn validate() {
+        // Complex logic
+    }
+    """
+    ```
+  </Accordion>
+  
+  <Accordion title="Name Variables Clearly">
+    Descriptive names improve script readability:
+    ```curd
+    let auth_module_uri = "src/auth.rs::validate"
+    let token_validation_patch = "..."
+    ```
+  </Accordion>
+</AccordionGroup>
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Control Flow" icon="diagram-project" href="/scripting/control-flow">
+    Learn about sequence, atomic, and abort
+  </Card>
+  <Card title="Tool Calls" icon="wrench" href="/scripting/tool-calls">
+    Call CURD tools with variable arguments
+  </Card>
+</CardGroup>

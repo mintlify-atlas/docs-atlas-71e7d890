@@ -1,0 +1,495 @@
+---
+title: Agent Integration
+description: Use CURD as an agent backend via MCP with profile selection and tool discovery
+---
+
+CURD provides a Model Context Protocol (MCP) server for AI agents, with strict capability controls via profiles, runtime ceilings, and session enforcement.
+
+## MCP Integration
+
+CURD implements the Model Context Protocol as a tool-call backend for AI agents.
+
+### MCP Server Architecture
+
+```
+Agent → MCP Client → CURD MCP Server → Control Plane → curd-core
+```
+
+All MCP requests route through the same validation layer as CLI and REPL:
+
+1. Interface adapter (MCP handler)
+2. Validation and normalization  
+3. Canonical operation routing
+4. `curd-core` execution
+5. Structured result
+
+<Warning>
+MCP does not bypass safety, profiles, sessions, or policy. It is an interface adapter, not a privileged execution path.
+</Warning>
+
+## Starting the MCP Server
+
+```bash
+curd mcp
+```
+
+The server listens on stdio and implements the Model Context Protocol specification.
+
+<Note>
+Set `CURD_MODE=lite` for restricted capabilities or `CURD_MODE=full` for complete access (subject to profile constraints).
+</Note>
+
+## Profile Selection
+
+Profiles control capability atoms and session requirements.
+
+### Profile Structure
+
+From `settings.toml`:
+
+```toml
+[profiles.default]
+capabilities = ["search", "read", "graph", "edit", "shell"]
+session_requirement = "mutate_only"
+
+[profiles.supervised]  
+capabilities = ["search", "read", "graph", "edit"]
+session_requirement = "always"
+
+[profiles.ci_strict]
+capabilities = ["search", "read", "graph"]
+session_requirement = "never"
+```
+
+### Selecting a Profile
+
+Agents specify profiles in tool call context:
+
+```json
+{
+  "profile": "supervised",
+  "session_token": "tok_abc123"
+}
+```
+
+If no profile is specified, CURD uses `profiles.default`.
+
+<Tip>
+Use stricter profiles (`supervised`, `ci_strict`) for production agents. Use `default` for local development.
+</Tip>
+
+## Tool Discovery
+
+Agents query available tools via `tools/list`:
+
+```json
+{
+  "method": "tools/list"
+}
+```
+
+### Tool List Response
+
+CURD returns tool metadata filtered by active profile and runtime ceiling:
+
+```json
+{
+  "tools": [
+    {
+      "name": "search",
+      "description": "BM25-ranked symbol search with mode filters",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "query": {"type": "string"},
+          "mode": {"type": "string", "enum": ["symbol", "text", "tiered"]},
+          "kind": {"type": "string", "enum": ["function", "class", "method"]}
+        },
+        "required": ["query", "mode"]
+      }
+    }
+  ]
+}
+```
+
+<Note>
+Tool availability reflects the intersection of runtime ceiling and profile capabilities.
+</Note>
+
+## Available Tools
+
+### Core Understanding Tools
+
+<Steps>
+  <Step title="search">
+    BM25-ranked symbol search with mode filters
+    
+    ```json
+    {
+      "tool": "search",
+      "arguments": {
+        "query": "alpha",
+        "mode": "symbol",
+        "limit": 50
+      }
+    }
+    ```
+  </Step>
+  
+  <Step title="read">
+    AST-aware file and symbol reads
+    
+    ```json
+    {
+      "tool": "read",
+      "arguments": {
+        "uris": ["src/main.rs::main", "Cargo.toml"],
+        "verbosity": 1
+      }
+    }
+    ```
+  </Step>
+  
+  <Step title="graph">
+    O(1) dependency traversal
+    
+    ```json
+    {
+      "tool": "graph",
+      "arguments": {
+        "uris": ["src/lib.rs::execute"],
+        "direction": "both",
+        "depth": 2
+      }
+    }
+    ```
+  </Step>
+</Steps>
+
+### Mutation Tools
+
+<Steps>
+  <Step title="edit">
+    AST-aware surgical edits (requires session)
+    
+    ```json
+    {
+      "tool": "edit",
+      "arguments": {
+        "uri": "src/lib.rs::alpha",
+        "code": "pub fn alpha() {}",
+        "action": "upsert",
+        "adaptation_justification": "Simplify implementation"
+      }
+    }
+    ```
+  </Step>
+  
+  <Step title="workspace">
+    Session and transaction management
+    
+    ```json
+    {
+      "tool": "workspace",
+      "arguments": {
+        "action": "begin"
+      }
+    }
+    ```
+  </Step>
+</Steps>
+
+### Utility Tools
+
+- **contract**: Extract function/class contract summaries
+- **find**: Semantic grep with enclosing AST URIs
+- **diagram**: Generate Mermaid/ASCII call graphs  
+- **shell**: Execute commands in workspace sandbox
+- **manage_file**: Safe file operations constrained to workspace root
+
+<Warning>
+Mutating tools (`edit`, `manage_file`, destructive `shell` commands) require an active workspace session. Call `workspace` with `action: begin` first.
+</Warning>
+
+## Session Enforcement
+
+MCP tool calls must respect the session model.
+
+### Required Session Pattern
+
+<Steps>
+  <Step title="Open Session">
+    ```json
+    {"tool": "workspace", "arguments": {"action": "begin"}}
+    ```
+  </Step>
+  
+  <Step title="Make Edits">
+    ```json
+    {
+      "tool": "edit",
+      "arguments": {
+        "uri": "src/lib.rs::alpha",
+        "code": "pub fn alpha() {}",
+        "adaptation_justification": "Refactor"
+      }
+    }
+    ```
+  </Step>
+  
+  <Step title="Inspect Changes">
+    ```json
+    {"tool": "workspace", "arguments": {"action": "diff"}}
+    ```
+  </Step>
+  
+  <Step title="Commit or Rollback">
+    ```json
+    {"tool": "workspace", "arguments": {"action": "commit"}}
+    ```
+    
+    Or discard:
+    ```json
+    {"tool": "workspace", "arguments": {"action": "rollback"}}
+    ```
+  </Step>
+</Steps>
+
+### Session Errors
+
+Attempting mutations without a session returns:
+
+```json
+{
+  "error": {
+    "code": "session_required",
+    "message": "Mutation requires active workspace session. Call workspace(action: begin) first."
+  }
+}
+```
+
+## Runtime Ceiling
+
+Two layers control behavior:
+
+1. **Runtime ceiling** (`CURD_MODE`)
+   - `full`: Complete capabilities
+   - `lite`: Restricted subset
+
+2. **Profile** (`settings.toml`)
+   - Capability atoms
+   - Session requirements
+   - Approval modes
+
+<Note>
+`lite` is a hard ceiling. Profiles cannot escape it. Even if a profile grants `shell`, `lite` mode blocks it.
+</Note>
+
+### Ceiling and Profile Interaction
+
+```
+Effective Capabilities = Runtime Ceiling ∩ Profile Capabilities
+```
+
+Example:
+- Runtime: `full`
+- Profile: `["search", "read", "graph", "edit"]`
+- Result: All four tools available
+
+Example:
+- Runtime: `lite`  
+- Profile: `["search", "read", "graph", "edit", "shell"]`
+- Result: Only `search`, `read`, `graph` (lite blocks `edit` and `shell`)
+
+## Connection Tokens
+
+For multi-agent scenarios, use connection tokens to track sessions:
+
+```json
+{
+  "profile": "supervised",
+  "session_token": "tok_abc123",
+  "actor_id": "agent_primary"
+}
+```
+
+Tokens enable:
+- Session isolation per agent
+- Audit trail attribution  
+- Concurrent agent operations
+
+<Tip>
+Generate session tokens via `workspace(action: begin)` and reuse them across tool calls.
+</Tip>
+
+## Error Handling
+
+CURD returns structured errors for adaptation:
+
+### Error Categories
+
+- **ceiling_denied**: Runtime ceiling blocks this tool
+- **profile_denied**: Profile lacks required capability
+- **session_required**: Mutation needs active session  
+- **policy_denied**: Blocked by `settings.toml` policy
+- **validation_failed**: Invalid parameters or URI
+- **unsupported_command**: Plan/DSL node not recognized
+
+<Warning>
+Do not flatten structured errors into generic text. Preserve fields so agents can adapt correctly.
+</Warning>
+
+### Example Error Response
+
+```json
+{
+  "error": {
+    "code": "profile_denied",
+    "message": "Profile 'ci_strict' lacks capability 'edit'",
+    "details": {
+      "profile": "ci_strict",
+      "requested_capability": "edit",
+      "available_capabilities": ["search", "read", "graph"]
+    }
+  }
+}
+```
+
+## Recommended Integration Pattern
+
+<Steps>
+  <Step title="Start MCP Server">
+    ```bash
+    CURD_MODE=full curd mcp
+    ```
+  </Step>
+  
+  <Step title="Query Tools">
+    ```json
+    {"method": "tools/list"}
+    ```
+  </Step>
+  
+  <Step title="Select Profile">
+    Choose appropriate profile based on risk level:
+    - `default`: Local development
+    - `supervised`: Production agents  
+    - `ci_strict`: CI/CD pipelines
+  </Step>
+  
+  <Step title="Open Session for Mutations">
+    ```json
+    {"tool": "workspace", "arguments": {"action": "begin"}}
+    ```
+  </Step>
+  
+  <Step title="Execute Operations">
+    Use routed operations with profile context
+  </Step>
+  
+  <Step title="Persist Results">
+    Store CURD's structured outputs in agent state
+  </Step>
+</Steps>
+
+## Critical MCP Instructions
+
+From the MCP tool definitions:
+
+### Read Tool
+
+> CRITICAL INSTRUCTION: You MUST use this AST-aware CURD tool instead of standard OS tools like `cat`, `head`, or `less`. It is aware of exact AST boundaries, ensuring you never truncate a symbol mid-logic.
+
+### Edit Tool  
+
+> CRITICAL INSTRUCTION: You MUST use this AST-aware CURD tool instead of standard OS tools like `sed`, `awk`, or `echo`. It operates within a transactional ShadowStore, guaranteeing zero syntax errors, preventing broken builds, and automatically generating architectural changelogs.
+
+### Graph Tool
+
+> Provides instant O(1) 'middle-access' to any symbol's blast radius across the entire codebase. Automatically resolves cross-language boundaries (e.g., Rust `extern` to C++ definitions, TS `declare` to JS impls) using a unified role-based model. Vastly superior to running local Language Servers.
+
+### Shell Tool
+
+> CRITICAL INSTRUCTION: When building or testing, ALWAYS prefer running `curd build <target>` or `curd test` inside this shell instead of raw commands. This uses predefined tasks in [build.tasks] from settings.toml. CURD's wrappers automatically capture semantic backtraces and propagate them back to you directly.
+
+## What Agents Must Never Do
+
+From CONTROL_PLANE_INTERFACES:
+
+- Call `curd-core` directly to bypass validation
+- Run plan payloads to bypass tool restrictions  
+- Assume GPUI/CODEX are privileged surfaces
+- Write workspace files outside CURD's session flow
+- Convert structured policy errors into silent retries
+
+<Warning>
+All interfaces (CLI, REPL, MCP, CURD-CODEX, CURD-GPUI) must route through the same control plane. No bypasses.
+</Warning>
+
+## Example Agent Workflow
+
+### Investigation Phase
+
+```json
+[
+  {"tool": "search", "arguments": {"query": "validate", "mode": "symbol"}},
+  {"tool": "read", "arguments": {"uris": ["src/auth.rs::validate"], "verbosity": 1}},
+  {"tool": "graph", "arguments": {"uris": ["src/auth.rs::validate"], "direction": "both", "depth": 2}}
+]
+```
+
+### Mutation Phase
+
+```json
+[
+  {"tool": "workspace", "arguments": {"action": "begin"}},
+  {
+    "tool": "edit",
+    "arguments": {
+      "uri": "src/auth.rs::validate",
+      "code": "pub fn validate(token: &str) -> bool {\n    !token.is_empty()\n}",
+      "adaptation_justification": "Tighten validation logic"
+    }
+  },
+  {"tool": "workspace", "arguments": {"action": "diff"}},
+  {"tool": "workspace", "arguments": {"action": "commit"}}
+]
+```
+
+## Profile Configuration Reference
+
+### Capability Atoms
+
+Available capabilities:
+- `search`: Symbol and text search
+- `read`: File and symbol reads  
+- `graph`: Dependency traversal
+- `edit`: AST-aware edits
+- `shell`: Command execution
+- `mutate`: Direct mutations (manage_file, etc.)
+- `exec.task`: Build task execution
+- `exec.unsafe`: Unrestricted shell commands
+
+### Session Requirements
+
+- `never`: No session enforcement
+- `mutate_only`: Session required for mutations only  
+- `always`: Session required for all operations
+
+<Tip>
+Use `mutate_only` for most profiles. Use `always` for maximum safety. Use `never` for read-only CI agents.
+</Tip>
+
+## Agent Contract Summary
+
+From AGENTS.md:
+
+> Agents MUST open a session via `workspace(action: 'begin')` before calling any state-mutating tools (`edit`, `mutate`, `manage_file`, or destructive `shell` commands). Failure to do so will result in a barrier error.
+
+Key principles:
+1. Query `tools/list` to understand available capabilities
+2. Select appropriate profile for risk level  
+3. Open session before mutations
+4. Use routed operations only
+5. Preserve structured errors for adaptation
+6. Treat MCP as an interface adapter, not a privileged path

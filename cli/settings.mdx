@@ -1,0 +1,618 @@
+---
+title: settings.toml Configuration
+description: Complete reference for .curd/settings.toml workspace configuration
+---
+
+## Overview
+
+The `.curd/settings.toml` file controls workspace behavior, indexing, build systems, profiles, and policies. It is created automatically by `curd init` and can be customized for your needs.
+
+## Location
+
+```
+workspace-root/
+└── .curd/
+    ├── settings.toml  ← Main configuration file
+    ├── index/
+    ├── plans/
+    └── traces/
+```
+
+## Structure
+
+The configuration is divided into sections:
+
+```toml
+[runtime]           # Runtime mode and ceiling
+[index]             # Symbol indexing configuration
+[build]             # Build system adapters
+[policy]            # Access control and restrictions
+[profiles.*]        # Agent capability profiles
+[doctor]            # Diagnostics thresholds
+[repl]              # REPL behavior
+[read]              # Read operation settings
+[plan]              # Plan execution limits
+```
+
+## Runtime Section
+
+Controls CURD's operational mode:
+
+```toml
+[runtime]
+ceiling = "full"  # or "lite"
+```
+
+### Options
+
+<ParamField path="ceiling" type="string" default="full">
+  Runtime ceiling mode:
+  
+  - `"full"` - All features enabled
+  - `"lite"` - Restricted feature set (search, read, edit, graph, workspace status only)
+  
+  **Note**: Profile capabilities cannot exceed ceiling.
+</ParamField>
+
+## Index Section
+
+Configures symbol indexing behavior:
+
+```toml
+[index]
+mode = "lazy"                    # "lazy" or "full"
+scope = "auto"                   # "auto" or "forced"
+max_file_size = 1048576          # 1MB in bytes
+large_file_policy = "skip"       # "skip", "skeleton", or "full"
+execution = "multithreaded"      # "multithreaded", "multiprocess", "singlethreaded"
+chunk_size = 100                 # For multiprocess mode
+
+exclude_patterns = [
+  "target/**",
+  "build/**",
+  "node_modules/**",
+  ".git/**"
+]
+```
+
+### Options
+
+<ParamField path="mode" type="string" default="lazy">
+  Index build mode:
+  
+  - `"lazy"` - Indexes files on-demand, faster startup
+  - `"full"` - Indexes all files upfront, slower startup but complete coverage
+</ParamField>
+
+<ParamField path="scope" type="string" default="auto">
+  Index scope:
+  
+  - `"auto"` - Automatic file discovery
+  - `"forced"` - Force re-indexing of all files
+</ParamField>
+
+<ParamField path="max_file_size" type="integer" default="1048576">
+  Maximum file size to index (in bytes).
+  
+  Files larger than this are handled according to `large_file_policy`.
+</ParamField>
+
+<ParamField path="large_file_policy" type="string" default="skip">
+  How to handle files exceeding `max_file_size`:
+  
+  - `"skip"` - Don't index large files
+  - `"skeleton"` - Index top-level symbols only (functions, classes)
+  - `"full"` - Index entire file regardless of size
+</ParamField>
+
+<ParamField path="execution" type="string" default="multithreaded">
+  Indexing execution model:
+  
+  - `"multithreaded"` - Parallel threads (good for most cases)
+  - `"multiprocess"` - Separate processes (better isolation, slower)
+  - `"singlethreaded"` - Sequential (debugging, low resource)
+</ParamField>
+
+<ParamField path="chunk_size" type="integer" default="100">
+  Files per chunk in multiprocess mode.
+  
+  Smaller chunks = more parallelism but more overhead.
+</ParamField>
+
+<ParamField path="exclude_patterns" type="array">
+  Glob patterns for files/directories to exclude from indexing.
+  
+  Common exclusions:
+  ```toml
+  exclude_patterns = [
+    "target/**",           # Rust build outputs
+    "build/**",            # Build artifacts
+    "dist/**",             # Distribution files
+    "node_modules/**",     # NPM dependencies
+    ".git/**",             # Git internals
+    "**/*.min.js",         # Minified files
+    "**/*.generated.*"     # Generated code
+  ]
+  ```
+</ParamField>
+
+## Build Section
+
+Configures build adapters:
+
+```toml
+[build]
+adapter = "cargo"        # Default adapter
+sandbox = false          # Enable sandboxing
+sandbox_mode = "bwrap"   # "bwrap", "docker", "macos"
+
+[build.adapters.my_custom]
+detect_files = ["my-build.toml"]
+commands.default = ["my-builder", "build"]
+commands.test = ["my-builder", "test"]
+commands.clean = ["my-builder", "clean"]
+trusted = false
+```
+
+### Options
+
+<ParamField path="adapter" type="string">
+  Default build adapter to use.
+  
+  Built-in: `cargo`, `npm`, `make`, `cmake`, etc.
+</ParamField>
+
+<ParamField path="sandbox" type="boolean" default="false">
+  Enable build command sandboxing.
+</ParamField>
+
+<ParamField path="sandbox_mode" type="string">
+  Sandboxing technology:
+  - `"bwrap"` - Linux bubblewrap
+  - `"docker"` - Docker containers
+  - `"macos"` - macOS sandbox
+</ParamField>
+
+### Custom Adapters
+
+Define custom build adapters:
+
+```toml
+[build.adapters.pixi]
+detect_files = ["pixi.toml"]
+commands.default = ["pixi", "run", "build"]
+commands.test = ["pixi", "run", "test"]
+commands.dev = ["pixi", "run", "dev"]
+trusted = true
+```
+
+<ParamField path="detect_files" type="array">
+  Files whose presence triggers adapter selection.
+</ParamField>
+
+<ParamField path="commands.*" type="array">
+  Command array for each target.
+  
+  Example targets: `default`, `test`, `clean`, `dev`, `prod`
+</ParamField>
+
+<ParamField path="trusted" type="boolean" default="false">
+  Whether adapter is trusted (no confirmation required).
+  
+  Set to `false` for custom adapters to require approval.
+</ParamField>
+
+## Policy Section
+
+Access control and security policies:
+
+```toml
+[policy.exec]
+allow_background = false      # Allow background processes
+timeout_ms = 300000           # 5 minutes
+workspace_bound_cwd = true    # Restrict cwd to workspace
+
+[policy.blocklist]
+paths = [
+  ".curd/settings.toml",
+  "secrets/**",
+  ".env"
+]
+commands = [
+  "rm -rf /",
+  "dd if=/dev/zero"
+]
+
+[policy.allowlist]
+paths = [
+  "src/**",
+  "tests/**",
+  "lib/**"
+]
+```
+
+### Exec Policy
+
+<ParamField path="allow_background" type="boolean" default="false">
+  Allow commands to spawn background processes.
+  
+  Disabling prevents agents from launching daemons.
+</ParamField>
+
+<ParamField path="timeout_ms" type="integer" default="300000">
+  Maximum execution time for commands (milliseconds).
+  
+  Commands exceeding this are terminated.
+</ParamField>
+
+<ParamField path="workspace_bound_cwd" type="boolean" default="true">
+  Restrict command working directory to workspace.
+  
+  Prevents commands from running in arbitrary directories.
+</ParamField>
+
+### Blocklist
+
+<ParamField path="paths" type="array">
+  File paths that cannot be modified.
+  
+  Supports glob patterns:
+  ```toml
+  paths = [
+    ".curd/settings.toml",  # Protect config
+    "secrets/**",            # Protect secrets dir
+    "**/.env",               # Protect environment files
+    "production/**"          # Protect production code
+  ]
+  ```
+</ParamField>
+
+<ParamField path="commands" type="array">
+  Shell commands that are forbidden.
+  
+  Exact matches only:
+  ```toml
+  commands = [
+    "rm -rf /",
+    "dd if=/dev/zero of=/dev/sda",
+    "curl | bash"
+  ]
+  ```
+</ParamField>
+
+### Allowlist
+
+<ParamField path="paths" type="array">
+  File paths that are allowed for modification.
+  
+  If specified, only these paths can be edited:
+  ```toml
+  [policy.allowlist]
+  paths = [
+    "src/**",      # Allow source files
+    "tests/**",    # Allow test files
+    "docs/**"      # Allow documentation
+  ]
+  # Everything else is read-only
+  ```
+</ParamField>
+
+## Profiles Section
+
+Define agent capability profiles:
+
+```toml
+[profiles.default]
+role = "human_developer"
+capabilities = [
+  "lookup",
+  "traverse",
+  "read",
+  "change.apply",
+  "session.begin",
+  "session.verify"
+]
+session_required_for_change = true
+promotion = "forbidden"
+
+[profiles.assist]
+role = "assist_agent"
+capabilities = ["lookup", "read"]
+session_required_for_change = true
+promotion = "forbidden"
+
+[profiles.supervised]
+role = "supervised_agent"
+capabilities = [
+  "lookup",
+  "traverse",
+  "read",
+  "change.apply",
+  "session.begin",
+  "session.verify",
+  "exec.task",
+  "plan.execute",
+  "review.run"
+]
+session_required_for_change = true
+promotion = "approval_required"
+
+[profiles.autonomous]
+role = "autonomous_agent"
+capabilities = [
+  "lookup",
+  "traverse",
+  "read",
+  "change.apply",
+  "session.begin",
+  "session.commit",
+  "exec.task",
+  "exec.command",
+  "plan.execute",
+  "review.run"
+]
+session_required_for_change = false
+promotion = "forbidden"
+```
+
+See [Profiles](/cli/profiles) for complete reference.
+
+## Doctor Section
+
+Diagnostics thresholds:
+
+```toml
+[doctor.thresholds]
+max_parse_fail = 10
+max_no_symbols_ratio = 0.1
+min_coverage_ratio = 0.8
+min_symbol_count = 100
+
+[doctor.profiles.ci_fast]
+max_parse_fail = 20
+min_coverage_ratio = 0.7
+min_symbol_count = 50
+
+[doctor.profiles.ci_strict]
+max_parse_fail = 0
+min_coverage_ratio = 0.95
+min_symbol_count = 1000
+require_coverage_state = "full"
+```
+
+### Options
+
+See [doctor command](/cli/doctor#thresholds) for threshold details.
+
+## REPL Section
+
+REPL interface configuration:
+
+```toml
+[repl]
+prompt = "curd>"
+history_file = ".curd_history"
+history_limit = 1000
+auto_indent = true
+color_output = true
+```
+
+<ParamField path="prompt" type="string" default="curd>">
+  REPL prompt string
+</ParamField>
+
+<ParamField path="history_file" type="string" default=".curd_history">
+  Command history file name (in workspace root)
+</ParamField>
+
+<ParamField path="history_limit" type="integer" default="1000">
+  Maximum history entries to keep
+</ParamField>
+
+<ParamField path="auto_indent" type="boolean" default="true">
+  Auto-indent multi-line input
+</ParamField>
+
+<ParamField path="color_output" type="boolean" default="true">
+  Colorize output
+</ParamField>
+
+## Read Section
+
+Read operation settings:
+
+```toml
+[read]
+verbosity = 1
+include_dependencies = false
+include_signatures = true
+```
+
+<ParamField path="verbosity" type="integer" default="1">
+  Default verbosity level:
+  - `0` - Source only
+  - `1` - Source + metadata
+  - `2` - Source + dependencies + context
+</ParamField>
+
+<ParamField path="include_dependencies" type="boolean" default="false">
+  Include dependency information in read results
+</ParamField>
+
+<ParamField path="include_signatures" type="boolean" default="true">
+  Include type signatures in symbol reads
+</ParamField>
+
+## Plan Section
+
+Plan execution limits:
+
+```toml
+[plan]
+max_nodes = 100
+max_dependencies_per_node = 10
+default_output_limit = 65536     # 64KB
+default_retry_limit = 0
+```
+
+<ParamField path="max_nodes" type="integer" default="100">
+  Maximum nodes allowed in a plan
+</ParamField>
+
+<ParamField path="max_dependencies_per_node" type="integer" default="10">
+  Maximum dependencies per plan node
+</ParamField>
+
+<ParamField path="default_output_limit" type="integer" default="65536">
+  Default output size limit per node (bytes)
+</ParamField>
+
+<ParamField path="default_retry_limit" type="integer" default="0">
+  Default retry count for failed nodes
+</ParamField>
+
+## Management Commands
+
+### Show Configuration
+
+```bash
+curd config show
+```
+
+Displays current `.curd/settings.toml` content.
+
+### Set Value
+
+```bash
+curd config set <key> <value>
+```
+
+Examples:
+```bash
+# Set index mode
+curd config set index.mode full
+
+# Set timeout
+curd config set policy.exec.timeout_ms 600000
+
+# Add blocklist path
+curd config set policy.blocklist.paths '["secrets/**", ".env"]'
+```
+
+### Unset Value
+
+```bash
+curd config unset <key>
+```
+
+Examples:
+```bash
+# Remove custom adapter
+curd config unset build.adapter
+
+# Clear exclude patterns
+curd config unset index.exclude_patterns
+```
+
+## Examples
+
+### High-Performance Indexing
+
+```toml
+[index]
+mode = "lazy"
+execution = "multiprocess"
+chunk_size = 50
+max_file_size = 524288  # 512KB
+large_file_policy = "skip"
+
+exclude_patterns = [
+  "target/**",
+  "node_modules/**",
+  "build/**",
+  "dist/**"
+]
+```
+
+### Strict Security
+
+```toml
+[policy.exec]
+allow_background = false
+timeout_ms = 60000  # 1 minute
+workspace_bound_cwd = true
+
+[policy.blocklist]
+paths = [
+  ".curd/**",
+  "secrets/**",
+  "**/.env",
+  "production/**"
+]
+commands = [
+  "rm -rf",
+  "curl | sh",
+  "wget -O- | bash"
+]
+
+[policy.allowlist]
+paths = [
+  "src/**",
+  "tests/**"
+]
+```
+
+### Multi-Language Monorepo
+
+```toml
+[build.adapters.backend]
+detect_files = ["backend/Cargo.toml"]
+commands.default = ["cargo", "build"]
+commands.test = ["cargo", "test"]
+trusted = true
+
+[build.adapters.frontend]
+detect_files = ["frontend/package.json"]
+commands.default = ["npm", "run", "build"]
+commands.test = ["npm", "test"]
+trusted = true
+
+[index]
+exclude_patterns = [
+  "target/**",
+  "node_modules/**",
+  "backend/target/**",
+  "frontend/dist/**"
+]
+```
+
+## Validation
+
+Validate configuration:
+
+```bash
+curd doctor
+```
+
+Reports:
+- Invalid TOML syntax
+- Unknown configuration keys
+- Invalid values (e.g., negative timeouts)
+- Profile capability errors
+
+## Related Documentation
+
+<CardGroup cols={2}>
+  <Card title="Profiles" icon="user-shield" href="/cli/profiles">
+    Agent capability configuration
+  </Card>
+  <Card title="Doctor" icon="stethoscope" href="/cli/doctor">
+    Diagnostics and validation
+  </Card>
+  <Card title="Build" icon="hammer" href="/cli/build">
+    Build adapter configuration
+  </Card>
+  <Card title="Policy" icon="shield-halved" href="/advanced/control-plane">
+    Security and access control
+  </Card>
+</CardGroup>

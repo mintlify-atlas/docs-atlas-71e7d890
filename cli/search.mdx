@@ -1,0 +1,297 @@
+---
+title: curd search
+description: Semantic search across indexed symbols with BM25 ranking and filters
+---
+
+## Overview
+
+The `curd search` command performs semantic, ranked search across your indexed codebase. It uses BM25 ranking with Tree-sitter-based symbol extraction to find functions, classes, modules, and other code structures.
+
+```bash
+curd search <query> [options]
+```
+
+## Usage
+
+```bash
+# Basic search
+curd search "authentication"
+
+# Search with kind filter
+curd search "validate" --kind function
+
+# Search in specific workspace
+curd search "User" --root /path/to/project
+
+# Using alias
+curd s "handler"
+curd sch "middleware"
+```
+
+## Arguments
+
+<ParamField path="query" type="string" required>
+  The search query string. Supports:
+  - Simple text: `"authentication"`
+  - Multi-word: `"user authentication handler"`
+  - Symbol patterns: `"validate_token"`
+</ParamField>
+
+## Options
+
+<ParamField path="--kind" type="string">
+  Filter results by symbol kind. Supported values:
+  - `function`
+  - `class`
+  - `struct`
+  - `enum`
+  - `trait`
+  - `interface`
+  - `method`
+  - `module`
+  - `constant`
+  - `variable`
+  
+  Language-specific kinds are automatically mapped.
+</ParamField>
+
+<ParamField path="--root" type="string" default=".">
+  Path to the workspace root
+</ParamField>
+
+## How Search Works
+
+### 1. Symbol Indexing
+
+CURD indexes your codebase using Tree-sitter parsers:
+- Extracts semantic symbols (functions, classes, etc.)
+- Captures full qualified names
+- Stores metadata (line numbers, signatures, contexts)
+
+### 2. BM25 Ranking
+
+Search uses BM25 algorithm for relevance ranking:
+- **Term frequency**: How often query terms appear in symbol
+- **Inverse document frequency**: Rarity of terms across codebase
+- **Field length normalization**: Balances short vs. long names
+
+Results are sorted by relevance score.
+
+### 3. Result Limits
+
+By default, search returns top 20 results. Results include:
+- Symbol name and kind
+- File path and line number
+- Relevance score
+- Context snippet (when available)
+
+## Output Format
+
+Search returns JSON with structured results:
+
+```json
+{
+  "results": [
+    {
+      "symbol": "validate_token",
+      "kind": "function",
+      "file": "src/auth.rs",
+      "line": 42,
+      "uri": "src/auth.rs::validate_token",
+      "score": 12.5,
+      "signature": "pub fn validate_token(token: &str) -> Result<Claims>"
+    }
+  ],
+  "total": 15,
+  "mode": "symbol"
+}
+```
+
+## Examples
+
+### Find Authentication Functions
+
+```bash
+curd search "authenticate" --kind function
+```
+
+### Locate User Classes
+
+```bash
+curd search "User" --kind class
+```
+
+### Find Error Handlers
+
+```bash
+curd search "error handler"
+```
+
+### Search Across Contexts
+
+When external contexts are linked:
+
+```bash
+# Searches both primary workspace and linked contexts
+curd search "shared_util"
+```
+
+See [Context Management](/cli/workspace#context) for linking repositories.
+
+## URI Format
+
+Search results include URIs that can be used with other commands:
+
+```bash
+# Search for a symbol
+curd search "process_request" --kind function
+# Returns: src/handlers.rs::process_request
+
+# Read the symbol
+curd read "src/handlers.rs::process_request"
+
+# Get dependency graph
+curd graph "src/handlers.rs::process_request" --depth 2
+
+# Edit the symbol
+curd edit "src/handlers.rs::process_request" --code "..."
+```
+
+## Search Modes
+
+Internal search modes (used by MCP/API):
+
+- `symbol` (default) - Search indexed symbols
+- `file` - Search file paths
+- `content` - Full-text content search
+
+CLI defaults to `symbol` mode.
+
+## Performance
+
+### Index Build
+
+First search triggers index build if needed:
+
+```bash
+# Force rebuild index
+curd doctor
+
+# Check index stats
+curd status
+```
+
+### Large Codebases
+
+**Lazy indexing** (default):
+- Fast startup
+- Indexes files on-demand
+- Good for large monorepos
+
+**Full indexing**:
+```toml
+# .curd/settings.toml
+[index]
+mode = "full"
+```
+- Indexes all files upfront
+- Better for comprehensive search
+- Slower initial build
+
+See [Index Configuration](/cli/settings#index) for tuning.
+
+## Integration with Other Commands
+
+### Search → Read
+
+```bash
+curd search "middleware" --kind function | jq -r '.results[0].uri' | xargs -I {} curd read {}
+```
+
+### Search → Graph
+
+```bash
+URI=$(curd search "main" --kind function | jq -r '.results[0].uri')
+curd graph "$URI" --depth 3
+```
+
+### Search → Edit
+
+```bash
+URI=$(curd search "deprecated_func" | jq -r '.results[0].uri')
+curd workspace begin
+curd edit "$URI" --action delete
+curd workspace commit
+```
+
+## Troubleshooting
+
+### No Results Found
+
+1. **Check index exists**:
+   ```bash
+   curd status
+   ```
+
+2. **Rebuild index**:
+   ```bash
+   curd doctor
+   ```
+
+3. **Verify file coverage**:
+   ```bash
+   curd test nodes --verbose
+   ```
+
+### Wrong Results
+
+1. **Check index mode**:
+   ```bash
+   # Switch to full indexing
+   curd config set index.mode full
+   curd doctor
+   ```
+
+2. **Verify language support**:
+   ```bash
+   curd doctor --verbose
+   ```
+
+### Performance Issues
+
+1. **Use lazy indexing**:
+   ```toml
+   [index]
+   mode = "lazy"
+   ```
+
+2. **Limit file size**:
+   ```toml
+   [index]
+   max_file_size = 524288  # 512KB
+   large_file_policy = "skip"
+   ```
+
+3. **Multiprocess indexing**:
+   ```toml
+   [index]
+   execution = "multiprocess"
+   chunk_size = 100
+   ```
+
+## Related Commands
+
+<CardGroup cols={2}>
+  <Card title="read" icon="book" href="/cli/read">
+    Read symbol source after finding it
+  </Card>
+  <Card title="graph" icon="diagram-project" href="/cli/graph">
+    Explore dependencies of found symbols
+  </Card>
+  <Card title="doctor" icon="stethoscope" href="/cli/doctor">
+    Diagnose and rebuild index
+  </Card>
+  <Card title="status" icon="chart-line" href="/cli/workspace#status">
+    Check index statistics
+  </Card>
+</CardGroup>

@@ -1,0 +1,420 @@
+---
+title: 'Plugin System'
+description: 'Signed plugin packages for language and tool extensions'
+---
+
+CURD's plugin system enables secure extension through cryptographically signed packages. Two plugin formats are supported:
+
+- **`.curdl`**: Language ecosystem packages (grammar, LSP, build metadata)
+- **`.curdt`**: Native tool packages (sandboxed sidecar executables)
+
+All plugins route through a trust model based on Ed25519 public key cryptography.
+
+## Plugin Formats
+
+### .curdl Language Packages
+
+Language packages extend CURD with AST parsing and build system integration.
+
+<ParamField path="language_id" type="string" required>
+  Unique identifier for the language (e.g., `"acme"`, `"custom-dsl"`)
+</ParamField>
+
+<ParamField path="extensions" type="array" required>
+  File extensions to map to this language (e.g., `[".acme", ".dsl"]`)
+</ParamField>
+
+<ParamField path="grammar_library_path" type="string" required>
+  Relative path to Tree-sitter grammar dylib (e.g., `"lib/tree-sitter-acme.dylib"`)
+</ParamField>
+
+<ParamField path="build_system" type="string">
+  Optional build adapter name (e.g., `"acme-build"`). Used during `curd build` auto-detection.
+</ParamField>
+
+<ParamField path="lsp_adapter" type="string">
+  Optional LSP adapter identifier for language server integration
+</ParamField>
+
+<ParamField path="debug_adapter" type="string">
+  Optional debug adapter identifier for DAP integration
+</ParamField>
+
+#### Installation Flow
+
+<Steps>
+  <Step title="Signature Verification">
+    CURD verifies archive extension, manifest kind, payload hashes, and Ed25519 signature
+  </Step>
+  
+  <Step title="Install to Plugin Directory">
+    Payload is unpacked to `.curd/plugins/lang/<package_id>/`
+  </Step>
+  
+  <Step title="Registry Rebuild">
+    CURD rebuilds `.curd/plugins/lang/languages.toml` for grammar discovery
+  </Step>
+  
+  <Step title="Active Integration">
+    Grammar registry picks up the new language for matching file extensions
+  </Step>
+</Steps>
+
+#### Build System Metadata
+
+When a `.curdl` plugin declares `build_system`, CURD uses this during workspace analysis:
+
+```rust
+// From curd-core/src/build.rs:347-383
+fn detect_language_plugin_adapter(root: &Path, cfg: &CurdConfig) -> Option<String> {
+    if !cfg.plugins.enabled {
+        return None;
+    }
+    let installed = crate::plugin_packages::load_installed_plugins(
+        root,
+        &cfg.plugins,
+        crate::plugin_packages::PluginKind::Language,
+    )
+    .ok()?;
+    let mut by_adapter: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    for record in installed {
+        let Some(spec) = record.language else {
+            continue;
+        };
+        let Some(build_system) = spec.build_system.filter(|s| !s.trim().is_empty()) else {
+            continue;
+        };
+        if !adapter_known(cfg, &build_system) {
+            continue;
+        }
+        for ext in spec.extensions {
+            if !ext.trim().is_empty() {
+                by_adapter
+                    .entry(build_system.clone())
+                    .or_default()
+                    .push(ext.trim_start_matches('.').to_string());
+            }
+        }
+    }
+    for (adapter, extensions) in by_adapter {
+        if workspace_has_any_extension(root, &extensions) {
+            return Some(adapter);
+        }
+    }
+    None
+}
+```
+
+The build system must resolve to either:
+- A built-in adapter name (`cargo`, `cmake`, `npm`, etc.)
+- A matching `[build.adapters.<name>]` entry in `settings.toml`
+
+**Example:**
+
+```toml
+# settings.toml
+[build.adapters.acme-build]
+detect_files = ["acme.build"]
+steps = [["acme-build", "compile"]]
+```
+
+If a `.curdl` plugin declares `build_system = "acme-build"` and the workspace contains `*.acme` files, CURD auto-selects that adapter.
+
+---
+
+### .curdt Native Tool Packages
+
+Tool packages extend CURD with sandboxed JSON-stdio sidecars.
+
+<ParamField path="tool_name" type="string" required>
+  Unique tool identifier (must not conflict with built-in tools)
+</ParamField>
+
+<ParamField path="executable_path" type="string" required>
+  Relative path to the tool binary (e.g., `"bin/acme-analyzer"`)
+</ParamField>
+
+<ParamField path="protocol" type="string" required>
+  Must be `"json_stdio_v1"`
+</ParamField>
+
+<ParamField path="agent_usage" type="string">
+  Guidance for AI agents on when/how to use this tool
+</ParamField>
+
+<ParamField path="review_guidance" type="string">
+  Operator review instructions for tool outputs
+</ParamField>
+
+<ParamField path="downstream_impact" type="string">
+  Description of blast radius and side effects
+</ParamField>
+
+<ParamField path="parameters" type="array">
+  JSON schema-compatible parameter definitions for MCP discovery
+</ParamField>
+
+#### Runtime Contract
+
+Tool executables must adhere to `json_stdio_v1`:
+
+1. **Read one JSON object from stdin**
+2. **Emit one JSON object on stdout**
+3. **Avoid extra framing or log noise on stdout** (use stderr for diagnostics)
+
+CURD enforces:
+- Entrypoint path confinement to install directory
+- Subprocess sandboxing
+- Timeout and output-size limits
+
+```rust
+// From curd-core/src/plugin_packages.rs:96-110
+pub struct ToolPluginSpec {
+    pub tool_name: String,
+    pub executable_path: String,
+    #[serde(default)]
+    pub default_args: Vec<String>,
+    #[serde(default = "default_stdio_protocol")]
+    pub protocol: String,
+    pub agent_usage: Option<String>,
+    pub review_guidance: Option<String>,
+    pub downstream_impact: Option<String>,
+    pub description: Option<String>,
+    #[serde(default)]
+    pub parameters: Vec<ToolDocParameter>,
+    #[serde(default)]
+    pub examples: Vec<ToolDocExample>,
+}
+```
+
+---
+
+## Trust Model
+
+### Trusted Signing Keys
+
+Plugin installation requires trusted Ed25519 public keys stored in `.curd/trusted_plugin_keys.json`:
+
+```json
+{
+  "keys": [
+    {
+      "key_id": "acme-corp",
+      "pubkey_hex": "a1b2c3...",
+      "label": "Acme Corp Official Plugins",
+      "allowed_kinds": ["language", "tool"],
+      "enabled": true,
+      "added_at_secs": 1709856000,
+      "fingerprint_sha256": "d4e5f6..."
+    }
+  ]
+}
+```
+
+<ParamField path="key_id" type="string" required>
+  Alphanumeric identifier for the signing authority
+</ParamField>
+
+<ParamField path="pubkey_hex" type="string" required>
+  Ed25519 public key in hex format (64 characters)
+</ParamField>
+
+<ParamField path="allowed_kinds" type="array" required>
+  Which plugin types this key can sign: `["language"]`, `["tool"]`, or both
+</ParamField>
+
+<ParamField path="enabled" type="boolean" default={true}>
+  Whether this key is currently active
+</ParamField>
+
+### Managing Trust
+
+<CodeGroup>
+```json Add Trusted Key
+{
+  "tool": "plugin_trust",
+  "args": {
+    "action": "add",
+    "key_id": "acme-corp",
+    "pubkey_hex": "a1b2c3d4e5f6...",
+    "allowed_kinds": ["language", "tool"]
+  }
+}
+```
+
+```json List Keys
+{
+  "tool": "plugin_trust",
+  "args": {
+    "action": "list"
+  }
+}
+```
+
+```json Disable Key
+{
+  "tool": "plugin_trust",
+  "args": {
+    "action": "disable",
+    "key_id": "acme-corp"
+  }
+}
+```
+</CodeGroup>
+
+---
+
+## Plugin Management
+
+### Installing Plugins
+
+<CodeGroup>
+```json Install Language Plugin
+{
+  "tool": "plugin_language",
+  "args": {
+    "action": "add",
+    "archive_path": "/path/to/acme-lang.curdl"
+  }
+}
+```
+
+```json Install Tool Plugin
+{
+  "tool": "plugin_tool",
+  "args": {
+    "action": "add",
+    "archive_path": "/path/to/analyzer.curdt"
+  }
+}
+```
+</CodeGroup>
+
+### Listing Installed Plugins
+
+<CodeGroup>
+```json List Language Plugins
+{
+  "tool": "plugin_language",
+  "args": {
+    "action": "list"
+  }
+}
+```
+
+```json List Tool Plugins
+{
+  "tool": "plugin_tool",
+  "args": {
+    "action": "list"
+  }
+}
+```
+</CodeGroup>
+
+### Removing Plugins
+
+<CodeGroup>
+```json Remove Language Plugin
+{
+  "tool": "plugin_language",
+  "args": {
+    "action": "remove",
+    "package_id": "acme-lang"
+  }
+}
+```
+
+```json Remove Tool Plugin
+{
+  "tool": "plugin_tool",
+  "args": {
+    "action": "remove",
+    "package_id": "analyzer"
+  }
+}
+```
+</CodeGroup>
+
+---
+
+## Packaging Plugins
+
+Use the `curd-plugin-pack` binary to create signed archives:
+
+```bash
+cargo run -q -p curd-core --bin curd-plugin-pack -- \
+  --manifest manifest.json \
+  --payload-root payload/ \
+  --out acme-lang.curdl \
+  --private-key-file signing.key
+```
+
+**Manifest Structure:**
+
+```json
+{
+  "schema_version": 1,
+  "package_id": "acme-lang",
+  "version": "0.1.0",
+  "kind": "language",
+  "signer_pubkey_hex": "a1b2c3...",
+  "description": "Acme DSL language support",
+  "files": [
+    {
+      "path": "lib/tree-sitter-acme.dylib",
+      "sha256": "d4e5f6...",
+      "size": 512000,
+      "executable": false
+    }
+  ],
+  "language": {
+    "language_id": "acme",
+    "extensions": [".acme"],
+    "grammar_library_path": "lib/tree-sitter-acme.dylib",
+    "grammar_symbol": "tree_sitter_acme",
+    "build_system": "acme-build"
+  }
+}
+```
+
+<Warning>
+  **Security**: The `--private-key-file` should be an Ed25519 private key in hex format. Keep this file secure and never commit it to version control.
+</Warning>
+
+---
+
+## Policy Configuration
+
+Control plugin behavior in `settings.toml`:
+
+```toml
+[plugins]
+enabled = true
+install_root = ".curd/plugins"
+trusted_keys_file = ".curd/trusted_plugin_keys.json"
+require_signatures = true
+allow_unsigned_dev_plugins = false
+allow_native_language_dylibs = true
+tool_runtime = "sidecar_stdio"
+```
+
+<ParamField path="require_signatures" type="boolean" default={true}>
+  Whether to enforce signature verification on all plugins
+</ParamField>
+
+<ParamField path="allow_unsigned_dev_plugins" type="boolean" default={false}>
+  Allow installation of unsigned plugins (development only)
+</ParamField>
+
+<ParamField path="allow_native_language_dylibs" type="boolean" default={true}>
+  Permit loading native Tree-sitter grammar libraries
+</ParamField>
+
+<ParamField path="tool_runtime" type="string" default="sidecar_stdio">
+  Tool execution policy. Must be `"sidecar_stdio"` for `.curdt` plugins to run.
+</ParamField>
+
+<Note>
+  Plugins are workspace-scoped. Trusted keys and installed plugins live under `.curd/` and do not propagate globally.
+</Note>

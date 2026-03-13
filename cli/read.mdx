@@ -1,0 +1,325 @@
+---
+title: curd read
+description: Read files or semantic symbols with automatic paging and overload resolution
+---
+
+## Overview
+
+The `curd read` command reads files or semantic symbols exactly as CURD's engine parses them. It supports both file paths and symbol URIs with automatic overload resolution and paging.
+
+```bash
+curd read <uri> [options]
+```
+
+## Usage
+
+```bash
+# Read entire file
+curd read src/main.rs
+
+# Read specific symbol
+curd read "src/auth.rs::validate_token"
+
+# Read from specific workspace
+curd read "lib.rs::User" --root /path/to/project
+
+# Using alias
+curd red "src/handlers.rs::process"
+```
+
+## Arguments
+
+<ParamField path="uri" type="string" required>
+  The URI to read. Supports two formats:
+  
+  **File URI**: `path/to/file.ext`
+  - Reads entire file content
+  - Example: `src/main.rs`
+  
+  **Symbol URI**: `path/to/file.ext::symbol_name`
+  - Reads specific function, class, or module
+  - Example: `src/auth.rs::validate_token`
+  - Example: `src/models.rs::User::new`
+</ParamField>
+
+## Options
+
+<ParamField path="--root" type="string" default=".">
+  Path to the workspace root
+</ParamField>
+
+## URI Format
+
+### File URI
+
+Read entire file:
+```bash
+curd read src/server.rs
+```
+
+### Symbol URI
+
+Read specific symbol using `::` separator:
+
+```bash
+# Function
+curd read "src/auth.rs::login"
+
+# Class/Struct
+curd read "src/models.rs::User"
+
+# Method
+curd read "src/models.rs::User::new"
+
+# Nested module
+curd read "src/db/connection.rs::establish"
+```
+
+### Overload Resolution
+
+When a symbol has multiple overloads (e.g., same function name in different scopes), CURD provides an interactive picker:
+
+```bash
+$ curd read "src/utils.rs::parse"
+
+Symbol 'parse' is overloaded with 2 definitions.
+
+Available options:
+  src/utils.rs::parse:12: fn parse(s: &str) -> i32
+  src/utils.rs::parse:45: fn parse(s: &str) -> f64
+
+? Select which overload to read:
+❯ src/utils.rs::parse:12: fn parse(s: &str) -> i32
+  src/utils.rs::parse:45: fn parse(s: &str) -> f64
+```
+
+Select with arrow keys and Enter. CURD will read the chosen overload.
+
+## Output Behavior
+
+### Automatic Paging
+
+By default, `curd read` pipes output through your pager:
+
+- Uses `$PAGER` environment variable (default: `less -R`)
+- Supports colored output with `-R` flag
+- Falls back to `cat` if pager unavailable
+
+### Raw Output
+
+To capture raw output without paging:
+
+```bash
+# Disable pager temporarily
+PAGER=cat curd read src/main.rs
+
+# Redirect to file
+curd read "src/auth.rs::validate" > function.rs
+
+# Pipe to other tools
+curd read src/config.rs | grep "const"
+```
+
+## Verbosity Levels
+
+Internal verbosity control (used by API/MCP):
+
+- **Level 0**: Symbol source only
+- **Level 1**: Source + metadata (signatures, line numbers)
+- **Level 2**: Source + dependencies + context
+
+CLI uses verbosity level 1.
+
+## Examples
+
+### Read Configuration File
+
+```bash
+curd read .curd/settings.toml
+```
+
+### Read Main Function
+
+```bash
+curd read "src/main.rs::main"
+```
+
+### Read Class with Methods
+
+```bash
+# Read entire class
+curd read "src/server.rs::HttpServer"
+
+# Read specific method
+curd read "src/server.rs::HttpServer::start"
+```
+
+### Read from Linked Context
+
+When external repositories are linked:
+
+```bash
+# Read from linked context
+curd read "@lib-common/src/utils.rs::helper"
+```
+
+See [Context Management](/cli/workspace#context) for details.
+
+## Integration Workflow
+
+### Search → Read
+
+```bash
+# Find symbol
+curd search "validate_token" --kind function
+# Returns URI: src/auth.rs::validate_token
+
+# Read it
+curd read "src/auth.rs::validate_token"
+```
+
+### Read → Edit
+
+```bash
+# Read current implementation
+curd read "src/auth.rs::validate_token" > current.rs
+
+# Modify locally, then apply
+curd workspace begin
+curd edit "src/auth.rs::validate_token" --code "$(cat modified.rs)"
+curd workspace commit
+```
+
+### Read → Graph
+
+```bash
+# Read symbol to understand it
+curd read "src/handlers.rs::process_request"
+
+# Explore its dependencies
+curd graph "src/handlers.rs::process_request" --depth 2
+```
+
+## Output Format
+
+When reading a symbol, CURD returns:
+
+### Source Code
+
+Extracted symbol with proper indentation:
+
+```rust
+pub fn validate_token(token: &str) -> Result<Claims> {
+    if token.is_empty() {
+        return Err(AuthError::EmptyToken);
+    }
+    // ... rest of function
+}
+```
+
+### JSON Format (MCP/API)
+
+Structured output includes:
+
+```json
+{
+  "results": [
+    {
+      "uri": "src/auth.rs::validate_token",
+      "kind": "function",
+      "source": "pub fn validate_token(...) { ... }",
+      "file": "src/auth.rs",
+      "line": 42,
+      "signature": "pub fn validate_token(token: &str) -> Result<Claims>",
+      "metadata": { ... }
+    }
+  ]
+}
+```
+
+## Shadow Workspace Reads
+
+When a shadow transaction is active, `curd read` automatically reads from the shadow workspace:
+
+```bash
+# Start transaction
+curd workspace begin
+
+# Edit symbol
+curd edit "src/auth.rs::validate" --code "..."
+
+# Read shows updated version from shadow
+curd read "src/auth.rs::validate"
+
+# Rollback
+curd workspace rollback
+
+# Read now shows original
+curd read "src/auth.rs::validate"
+```
+
+## Error Handling
+
+### Symbol Not Found
+
+```bash
+$ curd read "src/missing.rs::func"
+Read failed: Symbol not found: src/missing.rs::func
+```
+
+### File Not Indexed
+
+```bash
+$ curd read "new_file.rs::func"
+Read failed: File not in index
+```
+
+Solution: Rebuild index
+```bash
+curd doctor
+```
+
+### Parse Error
+
+```bash
+$ curd read "src/broken.rs"
+Read failed: Parse error at line 15
+```
+
+Check file syntax and run diagnostics:
+```bash
+curd doctor --verbose
+```
+
+## Configuration
+
+Customize read behavior in `.curd/settings.toml`:
+
+```toml
+[read]
+# Default verbosity for symbol reads
+verbosity = 1
+
+# Include dependency information
+include_dependencies = false
+
+# Include type signatures
+include_signatures = true
+```
+
+## Related Commands
+
+<CardGroup cols={2}>
+  <Card title="search" icon="magnifying-glass" href="/cli/search">
+    Find symbols before reading
+  </Card>
+  <Card title="edit" icon="pen" href="/cli/edit">
+    Modify symbols after reading
+  </Card>
+  <Card title="graph" icon="diagram-project" href="/cli/graph">
+    Explore symbol dependencies
+  </Card>
+  <Card title="workspace" icon="code-branch" href="/cli/workspace">
+    Read from shadow transactions
+  </Card>
+</CardGroup>

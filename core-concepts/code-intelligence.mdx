@@ -1,0 +1,340 @@
+---
+title: 'Code Intelligence'
+description: 'Search, graph, and read engines powered by Tree-sitter parsing, BM25 search, and semantic analysis'
+---
+
+CURD's code intelligence layer provides symbol-aware understanding of your codebase through three coordinated engines: SearchEngine, GraphEngine, and ReadEngine.
+
+## Architecture Overview
+
+The code intelligence system operates on a parsed index of your workspace, built using Tree-sitter grammars for structural understanding:
+
+```rust
+// curd-core/src/search.rs:22
+pub struct SearchEngine {
+    pub workspace_root: PathBuf,
+    pub config_override: Option<CurdConfig>,
+    pub registry: crate::registry::GrammarRegistry,
+    tx_events: Option<broadcast::Sender<SystemEvent>>,
+    last_stats: Arc<Mutex<Option<IndexBuildStats>>>,
+    pub compute_backend: Arc<std::sync::OnceLock<Option<Arc<crate::gpu::ComputeBackend>>>>,
+}
+```
+
+## Search Engine
+
+The SearchEngine provides symbol-level search with BM25 ranking and full-text search capabilities.
+
+### Index Modes
+
+CURD supports three index modes configured in `curd.toml`:
+
+<CodeGroup>
+```toml Lazy Mode
+[index]
+mode = "lazy"
+# Queries cache first, builds index only on miss
+```
+
+```toml Fast Mode
+[index]
+mode = "fast"
+# Uses query hints to filter files before parsing
+```
+
+```toml Full Mode
+[index]
+mode = "full"
+# Indexes entire workspace upfront
+```
+</CodeGroup>
+
+### Tree-sitter Parsing
+
+CURD uses Tree-sitter for structural parsing, extracting symbols with precise byte offsets:
+
+```rust
+// Symbols are extracted with full metadata
+pub struct Symbol {
+    pub id: String,              // Unique identifier
+    pub name: String,            // Symbol name
+    pub kind: SymbolKind,        // Function, Class, Module, etc.
+    pub filepath: PathBuf,       // Source file path
+    pub start_line: usize,       // 1-indexed start line
+    pub end_line: usize,         // 1-indexed end line
+    pub start_byte: usize,       // Byte offset start
+    pub end_byte: usize,         // Byte offset end
+    pub semantic_hash: Option<String>,  // Content hash for change detection
+    pub role: SymbolRole,        // Definition, Reference, Stub
+}
+```
+
+<Note>
+Tree-sitter parsing is language-agnostic. CURD includes built-in grammars for Rust, Python, TypeScript, JavaScript, Go, and more. Additional languages can be added via the grammar registry.
+</Note>
+
+### BM25 and Full-Text Search
+
+The search engine uses BM25 (Best Matching 25) ranking for relevance scoring:
+
+```bash
+# Search for symbols matching "validate"
+curd search validate
+
+# Filter by symbol kind
+curd search alpha --kind function
+```
+
+**Index Build Performance**:
+
+```rust
+// curd-core/src/search.rs:67
+pub struct IndexBuildStats {
+    pub index_mode: String,
+    pub parser_backend: String,
+    pub total_files: usize,
+    pub cache_hits: usize,
+    pub cache_misses: usize,
+    pub parse_fail: usize,
+    pub scan_ms: u64,
+    pub parse_ms: u64,
+    pub total_ms: u64,
+}
+```
+
+### Parser Backends
+
+CURD supports multiple parser backends:
+
+- **`native`**: Compiled Tree-sitter parsers (fastest)
+- **`wasm`**: WebAssembly parsers (portable)
+
+```toml
+[index]
+parser_backend = "native"
+max_file_size = 524288  # 512 KB
+large_file_policy = "skeleton"  # or "skip", "full"
+```
+
+<Warning>
+Files larger than `max_file_size` use skeleton parsing (top-level symbols only) or are skipped entirely based on `large_file_policy`.
+</Warning>
+
+## Graph Engine
+
+The GraphEngine models dependencies, calls, and relationships between symbols as a directed graph.
+
+### Dependency Graph Structure
+
+```rust
+// curd-core/src/graph.rs:13
+pub struct DependencyGraph {
+    pub outgoing: HashMap<String, HashSet<String>>,  // symbol -> callees
+    pub incoming: HashMap<String, HashSet<String>>,  // symbol -> callers
+    pub edge_kinds: Vec<(String, String, String)>,   // (from, to, kind)
+    pub edge_metadata: HashMap<String, EdgeMetadata>,
+    pub alias_nodes: HashSet<String>,
+    pub merkle_root: Option<String>,  // Graph integrity hash
+}
+```
+
+### Edge Types and Confidence
+
+Graph edges are typed with confidence scoring:
+
+```rust
+// curd-core/src/graph.rs:26
+pub struct EdgeMetadata {
+    pub tier: String,         // "high", "medium", "low"
+    pub confidence: f64,      // 0.0 - 1.0
+    pub source: Option<String>,  // Evidence source
+    pub evidence: Vec<String>,
+}
+```
+
+**Edge Kinds**:
+- `calls`: Function invocation
+- `imports`: Module dependency
+- `contains`: File contains symbol
+- `declares`: Symbol declaration
+- `owns_member`: Class owns method/field
+
+### Graph Traversal
+
+```bash
+# Find callers (upstream dependencies)
+curd graph src/auth.rs::validate --direction up --depth 2
+
+# Find callees (downstream dependencies)
+curd graph src/lib.rs::main --direction down --depth 3
+
+# Bidirectional neighborhood
+curd graph src/core.rs::process --direction both --depth 1
+```
+
+### Cycle Detection
+
+CURD uses Tarjan's strongly connected components algorithm to detect cycles:
+
+```rust
+// curd-core/src/graph.rs:113
+pub fn find_cycles(&self) -> Vec<Vec<String>> {
+    use petgraph::algo::tarjan_scc;
+    // Returns strongly connected components with size > 1
+}
+```
+
+### Graph Integrity Reporting
+
+```rust
+// curd-core/src/graph.rs:50
+pub struct GraphIntegrityReport {
+    pub cohesion_ratio: f64,  // resolved_stubs / total_stubs
+    pub total_stubs: usize,
+    pub resolved_stubs: usize,
+    pub symbol_density: f64,   // symbols per 1000 lines
+    pub confidence_distribution: HashMap<String, usize>,
+    pub cycles: Vec<Vec<String>>,
+}
+```
+
+<Info>
+The `cohesion_ratio` measures how many stub symbols (forward references) are resolved to actual definitions. Higher ratios indicate better graph completeness.
+</Info>
+
+## Read Engine
+
+The ReadEngine provides URI-based reads with contextual information.
+
+### URI Format
+
+CURD uses a hierarchical URI format:
+
+```
+file_path::symbol_name::line_number
+```
+
+**Examples**:
+- `src/lib.rs` - File-level read
+- `src/auth.rs::validate` - Function read
+- `src/auth.rs::validate::42` - Disambiguate overloaded function
+
+### Read Verbosity Levels
+
+```bash
+# Level 0: Outline only (metadata)
+curd read src/lib.rs::main --verbosity 0
+
+# Level 1: Full source code
+curd read src/lib.rs::main --verbosity 1
+
+# Level 2: Include graph neighborhood
+curd read src/lib.rs::main --verbosity 2
+```
+
+**Verbosity 0 Output**:
+```json
+{
+  "uri": "src/lib.rs::main",
+  "type": "function",
+  "name": "main",
+  "start_line": 15,
+  "end_line": 23
+}
+```
+
+**Verbosity 1 Output** (includes `code` field with full source)
+
+**Verbosity 2 Output** (includes `callers` and `callees` arrays)
+
+### Overload Disambiguation
+
+When multiple symbols match, ReadEngine provides disambiguation prompts:
+
+```rust
+// curd-core/src/read.rs:130
+if matches.len() > 1 {
+    if let Some(target_line) = line_part {
+        // Find exact match by line number
+    } else {
+        // Return available options with signatures
+        return Err(anyhow::anyhow!(
+            "Symbol '{}' is overloaded. Please disambiguate...",
+            uri
+        ));
+    }
+}
+```
+
+## Shadow Workspace Integration
+
+All three engines support shadow workspace reads during active transactions:
+
+```rust
+// Read from shadow instead of real workspace
+let results = read_engine.read(
+    vec!["src/auth.rs::validate".to_string()],
+    1,  // verbosity
+    Some(shadow_root),  // Use shadow root if available
+)?;
+```
+
+<Steps>
+
+### Step 1: Index is Built
+
+SearchEngine scans workspace and parses files using Tree-sitter
+
+### Step 2: Graph is Constructed
+
+GraphEngine analyzes parsed symbols to build dependency edges
+
+### Step 3: Queries Use Index
+
+SearchEngine and ReadEngine query the cached index (SQLite storage)
+
+### Step 4: Incremental Updates
+
+Only modified files are re-parsed (metadata-based change detection)
+
+</Steps>
+
+## Configuration Reference
+
+```toml
+[index]
+mode = "lazy"  # "lazy", "fast", "full", "scoped"
+parser_backend = "native"  # "native", "wasm"
+max_file_size = 524288  # 512 KB
+large_file_policy = "skeleton"  # "skip", "skeleton", "full"
+chunk_size = 64  # Files per parallel batch
+execution_model = "multiprocess"  # "multiprocess", "rayon"
+
+# Scoped indexing (mode = "scoped" only)
+scopes = ["src/", "lib/"]
+```
+
+## Performance Characteristics
+
+**Indexing Speed** (typical Rust project, ~1000 files):
+- Cold build: 2-5 seconds
+- Incremental: less than 500ms (metadata-based cache hits)
+
+**Search Latency**:
+- Cached query: less than 10ms
+- Fresh index + search: 2-3 seconds
+
+**Memory Usage**:
+- Index stored in SQLite (persistent)
+- In-memory: Minimal (query-time only)
+
+## Related Concepts
+
+<CardGroup cols={2}>
+  <Card title="Shadow Workspace" icon="layer-group" href="/core-concepts/shadow-workspace">
+    Transaction model for safe mutations
+  </Card>
+  <Card title="Profiles & Ceilings" icon="shield-halved" href="/core-concepts/profiles-and-ceilings">
+    Runtime capability boundaries
+  </Card>
+</CardGroup>

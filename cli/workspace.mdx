@@ -1,0 +1,612 @@
+---
+title: curd workspace
+description: Shadow transaction management with begin, commit, rollback, diff, and status commands
+---
+
+## Overview
+
+The `curd workspace` command manages shadow transactions for safe, reviewable mutations. All state-changing operations require an active workspace session.
+
+```bash
+curd workspace <action>
+```
+
+## Session Commands
+
+### Begin
+
+Start a new shadow transaction:
+
+```bash
+curd workspace begin
+```
+
+Alias: `curd session begin`
+
+Creates:
+- `.curd/shadow/root/` - Shadow workspace directory
+- Transaction UUID
+- Session metadata
+
+### Commit
+
+Apply shadow changes to workspace:
+
+```bash
+curd workspace commit
+```
+
+Alias: `curd session commit`
+
+Actions:
+- Writes shadow files back to workspace
+- Performs conflict-aware merge (three-way if conflicts)
+- Archives transaction
+- Removes shadow workspace
+- Invalidates index cache
+
+### Rollback
+
+Discard shadow changes:
+
+```bash
+curd workspace rollback
+```
+
+Alias: `curd session rollback`
+
+Actions:
+- Deletes shadow workspace
+- Preserves original workspace files
+- Cleans transaction state
+
+### Diff
+
+View staged changes:
+
+```bash
+curd workspace diff
+```
+
+Shows:
+- Modified files
+- Added symbols
+- Deleted symbols
+- Line-level diffs
+
+Output can be piped to diff viewers:
+```bash
+curd workspace diff | delta
+```
+
+### Status
+
+Display workspace state:
+
+```bash
+curd status
+```
+
+Alias: `curd workspace status`, `curd st`, `curd sts`
+
+Shows:
+- Index statistics
+- Shadow transaction status
+- Staged files
+- Build time
+
+## Complete Workflow
+
+### Basic Mutation
+
+```bash
+# 1. Start session
+curd workspace begin
+
+# 2. Make changes
+curd edit "src/auth.rs::validate" --code "pub fn validate() { ... }"
+
+# 3. Review changes
+curd workspace diff
+
+# 4. Apply or discard
+curd workspace commit
+# or: curd workspace rollback
+```
+
+### Multi-Edit Transaction
+
+```bash
+curd workspace begin
+
+# Multiple edits in one session
+curd edit "src/auth.rs::login" --code "..."
+curd edit "src/auth.rs::logout" --code "..."
+curd edit "src/handlers.rs::old_endpoint" --action delete
+
+# Review all changes together
+curd workspace diff
+
+# Check impact
+curd session review
+
+# Commit atomically
+curd workspace commit
+```
+
+### Script Execution
+
+```bash
+curd workspace begin
+
+# Execute .curd script (all edits in shadow)
+curd run fix_auth.curd
+
+# Review results
+curd workspace diff
+curd session review
+
+# Commit or rollback
+curd workspace commit
+```
+
+## Session Requirement
+
+**Mutating operations require active session**:
+
+```bash
+# ❌ WILL FAIL
+curd edit "src/lib.rs::func" --code "..."
+# Error: SESSION_REQUIRED
+
+# ✓ CORRECT
+curd workspace begin
+curd edit "src/lib.rs::func" --code "..."
+curd workspace commit
+```
+
+Operations requiring session:
+- `edit` (upsert/delete)
+- `refactor` (rename/move/extract)
+- `execute_dsl` (with mutating steps)
+- `execute_plan` (with mutating steps)
+- `.curd` script execution
+
+## Conflict Handling
+
+### Automatic Merge
+
+On commit, CURD detects conflicts:
+
+```bash
+curd workspace commit
+# Conflict detected in src/auth.rs
+# Attempting three-way merge...
+# Using: git merge-file
+```
+
+If merge succeeds:
+- Changes applied
+- Merge markers removed
+- Commit completes
+
+If merge fails:
+- Conflict markers left in file
+- Manual resolution required
+- Re-run commit after fixing
+
+### Base State Hashing
+
+Prevent conflicts with optimistic concurrency:
+
+```bash
+# Capture state before edits
+STATE=$(curd status --json | jq -r '.merkle_root')
+
+curd workspace begin
+curd edit "src/lib.rs::func" \
+  --base-state-hash "$STATE" \
+  --code "..."
+# Fails if workspace changed since STATE
+```
+
+## Session Review
+
+Inspect session impact:
+
+```bash
+curd session review
+```
+
+Returns:
+```json
+{
+  "session_id": "550e8400-e29b-41d4-a716-446655440000",
+  "staged_files": [
+    "src/auth.rs",
+    "src/handlers.rs"
+  ],
+  "architectural_impact": {
+    "affected_modules": ["auth", "api"],
+    "broken_links": 0,
+    "new_cycles": 0
+  },
+  "changes": [
+    {
+      "file": "src/auth.rs",
+      "symbol": "validate_token",
+      "action": "modified",
+      "lines_added": 5,
+      "lines_removed": 2
+    }
+  ]
+}
+```
+
+## Session Log
+
+View session operation history:
+
+```bash
+curd session log
+```
+
+Shows:
+- All tool calls in current session
+- Input/output for each operation
+- Timestamps
+- Success/failure status
+
+## Shadow Workspace Structure
+
+```
+.curd/shadow/
+├── root/                    # Shadow copy of workspace
+│   ├── src/
+│   │   ├── auth.rs          # Modified in shadow
+│   │   └── handlers.rs
+│   └── Cargo.toml
+├── metadata.json           # Session info
+└── transaction.log         # Operation log
+```
+
+When session is active:
+- All reads prefer shadow files
+- All writes go to shadow
+- Original workspace unchanged
+
+## Status Output
+
+```bash
+$ curd status
+
+=== CURD Workspace Status ===
+
+[Index]
+  Files Scanned: 1248
+  Cache Hits:    1100
+  Parse Fail:    3
+  No Symbols:    42
+  Build Time:    2340ms
+
+[Shadow Store: ACTIVE]
+  Staged Files:
+    - src/auth.rs
+    - src/handlers.rs
+
+  Run `curd workspace diff` to view changes.
+```
+
+## Advanced Session Management
+
+Alias: `curd session` for manual control
+
+### Manual Lifecycle
+
+```bash
+# Explicit session control
+curd session begin
+curd session review
+curd session log
+curd session commit
+# or: curd session rollback
+```
+
+### Nested Sessions
+
+<Warning>
+CURD does not support nested sessions. Only one transaction can be active at a time.
+</Warning>
+
+```bash
+curd workspace begin
+# ❌ Cannot start another
+curd workspace begin
+# Error: SESSION_ALREADY_ACTIVE
+```
+
+Commit or rollback before starting new session.
+
+## Semantic Tests
+
+Run integrity tests on symbol graph:
+
+```bash
+curd test <scope> [options]
+```
+
+### Test Scopes
+
+<ParamField path="scope" type="string" default="all">
+  Test scope to run:
+  - `nodes` - Symbol index coverage
+  - `edges` - Graph connectivity
+  - `policy` - Policy engine validation
+  - `architecture` - Cyclical dependencies
+  - `all` - All tests
+</ParamField>
+
+<ParamField path="--root" type="string" default=".">
+  Workspace root
+</ParamField>
+
+<ParamField path="--verbose" type="boolean">
+  Show detailed findings (dead zones, broken links, cycles)
+</ParamField>
+
+### Node Coverage Test
+
+```bash
+curd test nodes --verbose
+```
+
+Checks:
+- Symbols indexed per file
+- Symbol density (symbols/KLoC)
+- Dead zones (files with 0 symbols)
+
+Output:
+```
+[Node Coverage]
+  Symbols indexed: 3,421
+  Symbol Density:  28.5 symbols/KLoC
+  
+  Dead Zones (0 symbols indexed):
+    • tests/fixtures/invalid.rs
+    • build/generated.rs
+```
+
+### Edge Connectivity Test
+
+```bash
+curd test edges --verbose
+```
+
+Checks:
+- Graph cohesion ratio
+- Broken links (unresolved calls)
+- Stub resolution
+- Confidence distribution
+
+Output:
+```
+[Edge Connectivity]
+  Cohesion Ratio: 94% (Optimal)
+  Broken Links:   12
+  Resolution:     456/468 @stubs resolved
+
+[Confidence Intervals]
+  High (>=90%):   3,124
+  Medium (>=70%): 234
+  Low (<70%):     42
+```
+
+### Architecture Audit Test
+
+```bash
+curd test architecture --verbose
+```
+
+Checks:
+- Cyclical dependencies
+- Tangled clusters
+- Module boundaries
+
+Output:
+```
+[Architecture Audit]
+  Detected 2 Tangled Clusters (Cycles):
+    Cluster 1: 5 nodes
+      - src/module_a.rs::func_1
+      - src/module_b.rs::func_2
+      - src/module_a.rs::func_3
+```
+
+### Policy Validation Test
+
+```bash
+curd test policy
+```
+
+Validates:
+- PolicyEngine blocks illegal edits
+- Blocklists/allowlists enforced
+- Protected paths respected
+
+## Diff Output
+
+Semantic AST-level diff:
+
+```bash
+curd diff --semantic
+```
+
+<ParamField path="--semantic" type="boolean">
+  Use AST-level semantic diff (not line-based)
+</ParamField>
+
+<ParamField path="--symbol" type="string">
+  Diff specific symbol only
+</ParamField>
+
+<ParamField path="--root" type="string" default=".">
+  Workspace root
+</ParamField>
+
+Example:
+```bash
+# Full workspace diff
+curd diff --semantic
+
+# Specific symbol
+curd diff --semantic --symbol "src/auth.rs::validate"
+```
+
+## Context Management
+
+Link external repositories:
+
+```bash
+curd context add <path> [options]
+curd context remove <name> [options]
+curd context list
+```
+
+### Add Context
+
+<ParamField path="path" type="PathBuf" required>
+  Path to external repository
+</ParamField>
+
+<ParamField path="--alias" type="string">
+  Alias for this context (auto-generated if omitted)
+</ParamField>
+
+<ParamField path="--index" type="boolean">
+  Link in Index mode (search/graph only, no file reads)
+</ParamField>
+
+<ParamField path="--read" type="boolean">
+  Link in Read mode (read-only, no writes)
+</ParamField>
+
+Examples:
+```bash
+# Full read access
+curd context add ../shared-lib --alias common --read
+
+# Index-only (search/graph)
+curd context add ../framework --alias fw --index
+```
+
+### Remove Context
+
+```bash
+curd context remove common
+
+# Force removal even with dangling dependencies
+curd context remove common --force
+```
+
+### List Contexts
+
+```bash
+curd context list
+```
+
+Output:
+```
+Linked Contexts:
+  common -> /path/to/shared-lib (Mode: Read)
+  fw -> /path/to/framework (Mode: Index)
+```
+
+## Workspace Lifecycle
+
+### Detach
+
+Soft detach CURD from workspace:
+
+```bash
+curd detach [--shadow <disposition>]
+```
+
+Actions:
+- Removes git hooks
+- Scrubs scripts
+- Preserves `.curd/` data
+
+Shadow disposition:
+- `commit` - Commit active shadow before detach
+- `rollback` - Rollback active shadow
+- `abort` - Fail if shadow active
+
+### Delete
+
+Permanently remove CURD:
+
+```bash
+curd delete [--yes] [--shadow <disposition>]
+```
+
+Actions:
+- Removes entire `.curd/` directory
+- Deletes history, plans, index
+- Irreversible
+
+Requires confirmation unless `--yes` provided.
+
+## History
+
+View operation history:
+
+```bash
+curd log [options]
+```
+
+<ParamField path="--root" type="string" default=".">
+  Workspace root
+</ParamField>
+
+<ParamField path="--limit" type="integer" default="10">
+  Number of recent entries to show
+</ParamField>
+
+Example:
+```bash
+curd log --limit 20
+```
+
+Output:
+```
+Timestamp: 1678901234
+Collab:    agent-alpha
+Operation: edit
+Input:
+  {
+    "uri": "src/auth.rs::validate",
+    "action": "upsert",
+    "code": "..."
+  }
+Output:
+  {
+    "message": "Symbol updated successfully"
+  }
+```
+
+## Related Commands
+
+<CardGroup cols={2}>
+  <Card title="edit" icon="pen" href="/cli/edit">
+    Mutate symbols in shadow
+  </Card>
+  <Card title="run" icon="play" href="/cli/run">
+    Execute scripts in sessions
+  </Card>
+  <Card title="test" icon="vial">
+    Run semantic integrity tests
+  </Card>
+  <Card title="status" icon="chart-line">
+    Check workspace state
+  </Card>
+</CardGroup>
